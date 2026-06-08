@@ -192,21 +192,56 @@ describe("validatePayload edge cases", () => {
     assert.equal(negative.valid, false);
   });
 
-  it("reports valid message types that have no registered schema", () => {
-    const result = validatePayload("system.error", {
+  it("accepts newly registered payment.schedule and system.error schemas", () => {
+    const schedule = validatePayload("payment.schedule", {
       meta: { invoice_id: "inv-edge-1", currency: "JPY" },
-      data: { error_code: "x", message: "x", retryable: false },
+      data: {
+        scheduled_payment_date: "2026-02-01",
+        amount_scheduled: 1100,
+        payment_method: "bank_transfer",
+        legacy_field: "preserved",
+      },
+    });
+    const error = validatePayload("system.error", {
+      meta: { invoice_id: "inv-edge-1", currency: "JPY" },
+      data: {
+        error_code: "x",
+        message: "x",
+        retryable: false,
+        legacy_field: "preserved",
+      },
     });
 
-    assert.equal(result.valid, false);
-    assert.ok(result.errors?.some((error) => error.includes("No schema registered")));
+    assert.equal(schedule.valid, true);
+    assert.equal(error.valid, true);
+  });
+
+  it("rejects clearly invalid registered payment and error fields", () => {
+    const schedule = validatePayload("payment.schedule", {
+      meta: { invoice_id: "inv-edge-1", currency: "JPY" },
+      data: { scheduled_payment_date: "2026-02-30" },
+    });
+    const error = validatePayload("system.error", {
+      meta: { invoice_id: "inv-edge-1", currency: "JPY" },
+      data: { retryable: "no" },
+    });
+
+    assert.equal(schedule.valid, false);
+    assert.equal(error.valid, false);
   });
 });
 
 describe("validateBusinessRules edge cases", () => {
   it("allows one yen line-tax rounding differences", () => {
     const payload = makeInvoiceIssuePayload();
-    payload.data.line_items = [makeLine({ amount_excluding_tax: 333, tax_amount: 32 })];
+    payload.data.line_items = [
+      makeLine({
+        unit_price: 333,
+        amount_excluding_tax: 333,
+        tax_amount: 32,
+        amount_including_tax: 365,
+      }),
+    ];
     payload.data.subtotal = 333;
     payload.data.tax_total = 32;
     payload.data.total = 365;
@@ -215,6 +250,61 @@ describe("validateBusinessRules edge cases", () => {
 
     assert.equal(result.valid, true);
     assert.equal(result.fixableIssues.length, 0);
+  });
+
+  it("allows one yen line amount and including-tax rounding differences", () => {
+    const payload = makeInvoiceIssuePayload();
+    payload.data.line_items = [
+      makeLine({
+        quantity: 3,
+        unit_price: 333.33,
+        amount_excluding_tax: 999,
+        tax_amount: 100,
+        amount_including_tax: 1098,
+      }),
+    ];
+    payload.data.subtotal = 999;
+    payload.data.tax_total = 100;
+    payload.data.total = 1099;
+
+    const result = validateBusinessRules(payload);
+
+    assert.equal(result.valid, true);
+    assert.equal(result.fixableIssues.length, 0);
+  });
+
+  it("rejects material quantity and unit price amount mismatches", () => {
+    const payload = makeInvoiceIssuePayload();
+    payload.data.line_items = [
+      makeLine({
+        quantity: 2,
+        unit_price: 500,
+        tax_rate: 0,
+        amount_excluding_tax: 900,
+        tax_amount: 0,
+        amount_including_tax: 900,
+      }),
+    ];
+    payload.data.subtotal = 900;
+    payload.data.tax_total = 0;
+    payload.data.total = 900;
+
+    const result = validateBusinessRules(payload);
+
+    assert.equal(result.valid, false);
+    assert.ok(result.fixableIssues.some((issue) => issue.code === "line_amount_mismatch"));
+  });
+
+  it("rejects material including-tax and line total mismatches", () => {
+    const payload = makeInvoiceIssuePayload();
+    payload.data.line_items = [makeLine({ amount_including_tax: 1200 })];
+
+    const result = validateBusinessRules(payload);
+    const codes = result.fixableIssues.map((issue) => issue.code);
+
+    assert.equal(result.valid, false);
+    assert.ok(codes.includes("line_amount_including_tax_mismatch"));
+    assert.ok(codes.includes("line_total_mismatch"));
   });
 
   it("rejects due_date equal to issue_date", () => {

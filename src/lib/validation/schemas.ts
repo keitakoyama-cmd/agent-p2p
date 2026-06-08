@@ -238,6 +238,29 @@ const invoiceAcceptSchema = {
   },
 };
 
+// --- payment.schedule schema ---
+const paymentScheduleSchema = {
+  $id: "payment.schedule",
+  type: "object",
+  required: ["meta", "data"],
+  properties: {
+    meta: {
+      type: "object",
+      required: ["invoice_id", "currency"],
+    },
+    data: {
+      type: "object",
+      properties: {
+        scheduled_payment_date: { type: "string", format: "date" },
+        scheduled_at: { type: "string", format: "date-time" },
+        amount_scheduled: { type: "number", minimum: 0 },
+        payment_method: { type: "string" },
+        payment_reference: { type: "string" },
+      },
+    },
+  },
+};
+
 // --- payment.notice schema ---
 const paymentNoticeSchema = {
   $id: "payment.notice",
@@ -271,6 +294,28 @@ const paymentNoticeSchema = {
   },
 };
 
+// --- system.error schema ---
+const systemErrorSchema = {
+  $id: "system.error",
+  type: "object",
+  required: ["meta", "data"],
+  properties: {
+    meta: {
+      type: "object",
+      required: ["invoice_id", "currency"],
+    },
+    data: {
+      type: "object",
+      properties: {
+        error_code: { type: "string" },
+        message: { type: "string" },
+        retryable: { type: "boolean" },
+        failed_stage: { type: "string" },
+      },
+    },
+  },
+};
+
 // Register all schemas
 const schemas: Record<string, object> = {
   "invoice.issue": invoiceIssueSchema,
@@ -278,7 +323,9 @@ const schemas: Record<string, object> = {
   "invoice.reject": invoiceRejectSchema,
   "invoice.request_fix": invoiceRequestFixSchema,
   "invoice.accept": invoiceAcceptSchema,
+  "payment.schedule": paymentScheduleSchema,
   "payment.notice": paymentNoticeSchema,
+  "system.error": systemErrorSchema,
 };
 
 for (const [, schema] of Object.entries(schemas)) {
