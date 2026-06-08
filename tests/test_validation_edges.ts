@@ -68,7 +68,8 @@ function makeInvoiceIssuePayload(): InvoiceIssuePayload {
 function makeSignedEnvelope(
   messageType: MessageType,
   privateKey: Uint8Array,
-  expiresAt: string | null
+  expiresAt: string | null,
+  createdAt = new Date(Date.now() - 1000).toISOString()
 ): Envelope {
   const payload = { ok: true };
   const unsigned: Envelope = {
@@ -78,7 +79,7 @@ function makeSignedEnvelope(
     to: TO,
     message_type: messageType,
     schema_version: "1.0.0",
-    created_at: "2026-01-01T00:00:00.000Z",
+    created_at: createdAt,
     idempotency_key: "idem-edge-1",
     expires_at: expiresAt,
     payload_hash: computePayloadHash(payload),
@@ -292,6 +293,49 @@ describe("validateTransport edge cases", () => {
     assert.equal(expiredResult.errorCode, "expired_message");
     assert.equal(invalidResult.valid, false);
     assert.equal(invalidResult.errorCode, "invalid_schema");
+  });
+
+  it("rejects invalid created_at values before signature validation", () => {
+    const { privateKey, publicKey } = generateKeyPair();
+    const invalidText = makeSignedEnvelope("invoice.issue", privateKey, null, "not-a-date");
+    const invalidDate = makeSignedEnvelope(
+      "invoice.issue",
+      privateKey,
+      null,
+      "2026-02-30T00:00:00.000Z"
+    );
+    const sender = makeRegistry(publicKey, ["invoice.issue"]);
+
+    const textResult = validateTransport(invalidText, sender);
+    const dateResult = validateTransport(invalidDate, sender);
+
+    assert.equal(textResult.valid, false);
+    assert.equal(textResult.errorCode, "invalid_schema");
+    assert.equal(dateResult.valid, false);
+    assert.equal(dateResult.errorCode, "invalid_schema");
+  });
+
+  it("rejects created_at values beyond the accepted clock skew", () => {
+    const { privateKey, publicKey } = generateKeyPair();
+    const future = new Date(Date.now() + 6 * 60 * 1000).toISOString();
+    const envelope = makeSignedEnvelope("invoice.issue", privateKey, null, future);
+    const sender = makeRegistry(publicKey, ["invoice.issue"]);
+
+    const result = validateTransport(envelope, sender);
+
+    assert.equal(result.valid, false);
+    assert.equal(result.errorCode, "invalid_schema");
+  });
+
+  it("accepts created_at values within the accepted clock skew", () => {
+    const { privateKey, publicKey } = generateKeyPair();
+    const future = new Date(Date.now() + 4 * 60 * 1000).toISOString();
+    const envelope = makeSignedEnvelope("invoice.issue", privateKey, null, future);
+    const sender = makeRegistry(publicKey, ["invoice.issue"]);
+
+    const result = validateTransport(envelope, sender);
+
+    assert.equal(result.valid, true);
   });
 
   it("accepts active senders with capability, future expiry, and valid signature", () => {
