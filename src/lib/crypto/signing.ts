@@ -7,7 +7,50 @@ import { sign, verify, toBase64, fromBase64 } from "./keys";
  * This ensures deterministic serialization for signing.
  */
 export function canonicalJson(obj: unknown): string {
-  return JSON.stringify(obj, Object.keys(obj as object).sort());
+  const canonical = stringifyCanonical(obj, new WeakSet<object>());
+  if (canonical === undefined) {
+    throw new TypeError("Cannot canonicalize value as JSON");
+  }
+  return canonical;
+}
+
+function stringifyCanonical(value: unknown, seen: WeakSet<object>): string | undefined {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+
+  if (hasToJson(value)) {
+    return stringifyCanonical(value.toJSON(), seen);
+  }
+
+  if (seen.has(value)) {
+    throw new TypeError("Cannot canonicalize circular structure");
+  }
+
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => stringifyCanonical(item, seen) ?? "null").join(",")}]`;
+    }
+    return stringifyObject(value, seen);
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function stringifyObject(value: object, seen: WeakSet<object>): string {
+  const fields = Object.entries(value as Record<string, unknown>)
+    .filter(([, entry]) => entry !== undefined && typeof entry !== "function")
+    .filter(([, entry]) => typeof entry !== "symbol")
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+  const body = fields
+    .map(([key, entry]) => `${JSON.stringify(key)}:${stringifyCanonical(entry, seen)}`)
+    .join(",");
+  return `{${body}}`;
+}
+
+function hasToJson(value: object): value is { toJSON: () => unknown } {
+  return typeof (value as { toJSON?: unknown }).toJSON === "function";
 }
 
 /**
