@@ -79,6 +79,40 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function globPatternMatches(value: string, pattern: string): boolean {
+  const source = pattern
+    .split("*")
+    .map((part) => escapeRegExp(part))
+    .join(".*");
+  return new RegExp(`^${source}$`).test(value);
+}
+
+function isEnvContainerKey(key: string): boolean {
+  const normalized = key.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+  return ["env", "envs", "environment", "environmentvariables", "envvars"].includes(normalized);
+}
+
+function extractEnvName(value: string): string | null {
+  const match = value.trim().match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+  return match?.[1] ?? null;
+}
+
+function isLikelyEnvName(value: string): boolean {
+  return /^[A-Z][A-Z0-9_]*$/.test(value);
+}
+
+function isSensitiveEnvName(value: string): boolean {
+  const name = value.toUpperCase();
+  if (name.startsWith("AWS_")) return true;
+  if (name === "DATABASE_URL" || name === "PGPASSWORD") return true;
+  if (/(^|_)TOKEN($|_)/.test(name) || name.endsWith("TOKEN")) return true;
+  if (/(^|_)PASSWORD($|_)/.test(name) || name.endsWith("PASSWORD")) return true;
+  if (/(^|_)SECRET($|_)/.test(name) || name.endsWith("SECRET")) return true;
+  if (/(^|_)CREDENTIALS?($|_)/.test(name) || name.endsWith("CREDENTIALS")) return true;
+  if (name.includes("PUBLIC_KEY")) return false;
+  return /(^|_)(API|ACCESS|PRIVATE|SECRET)_KEY($|_)/.test(name);
+}
+
 export class TaskPolicyManager extends EventEmitter {
   private agentId: AgentId;
   private policy: TaskPolicy;
@@ -149,6 +183,15 @@ export class TaskPolicyManager extends EventEmitter {
     // 3. Check blocked paths in input
     const pathThreats = this.checkBlockedPaths(task.input, policy.blocked_paths, "input");
     threats.push(...pathThreats);
+
+    // 4. Check blocked env names in env-like task input
+    const envThreats = this.checkBlockedEnvPatterns(
+      task.input,
+      policy.blocked_env_patterns,
+      "input",
+      false
+    );
+    threats.push(...envThreats);
 
     // Decision
     if (threats.length > 0) {
@@ -224,6 +267,52 @@ export class TaskPolicyManager extends EventEmitter {
     }
 
     return new RegExp(`${boundary}${escaped}${pathEnd}`).test(value);
+  }
+
+  private checkBlockedEnvPatterns(
+    value: unknown,
+    blockedPatterns: string[],
+    path: string,
+    inEnvContext: boolean
+  ): ThreatEntry[] {
+    const threats: ThreatEntry[] = [];
+
+    if (typeof value === "string") {
+      const envName = inEnvContext ? extractEnvName(value) : null;
+      if (envName) threats.push(...this.checkBlockedEnvName(envName, blockedPatterns, path));
+    } else if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) {
+        threats.push(...this.checkBlockedEnvPatterns(value[i], blockedPatterns, `${path}[${i}]`, inEnvContext));
+      }
+    } else if (value && typeof value === "object") {
+      for (const [key, val] of Object.entries(value)) {
+        const keyPath = `${path}.${key}`;
+        const keyIsEnvName = inEnvContext || isLikelyEnvName(key);
+        const nextEnvContext = inEnvContext || isEnvContainerKey(key);
+        if (keyIsEnvName) threats.push(...this.checkBlockedEnvName(key, blockedPatterns, keyPath));
+        threats.push(...this.checkBlockedEnvPatterns(val, blockedPatterns, keyPath, nextEnvContext));
+      }
+    }
+
+    return threats;
+  }
+
+  private checkBlockedEnvName(
+    envName: string,
+    blockedPatterns: string[],
+    path: string
+  ): ThreatEntry[] {
+    if (!isSensitiveEnvName(envName)) return [];
+
+    const normalized = envName.toUpperCase();
+    return blockedPatterns
+      .filter((pattern) => globPatternMatches(normalized, pattern.toUpperCase()))
+      .map((pattern) => ({
+        category: "credential_access" as const,
+        pattern: `blocked env: ${pattern}`,
+        matched_text: envName,
+        location: path,
+      }));
   }
 
   // ============================================================

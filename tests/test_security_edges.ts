@@ -147,6 +147,28 @@ describe("TaskPolicyManager edge cases", () => {
     assert.equal(envExample.allowed, true);
   });
 
+  it("applies blocked_env_patterns to env-like input", () => {
+    const result = manager.checkTask(PEER_A, makeTask("Run CI checks", {
+      env: {
+        CI_JOB_TOKEN: "redacted",
+      },
+    }));
+
+    assert.equal(result.allowed, false);
+    assert.ok(result.threats?.some((t) => t.pattern === "blocked env: *TOKEN*"));
+    assert.ok(result.threats?.some((t) => t.location === "input.env.CI_JOB_TOKEN"));
+  });
+
+  it("does not apply blocked_env_patterns outside env-like input", () => {
+    const result = manager.checkTask(PEER_A, makeTask("Review feature notes", {
+      metadata: {
+        title: "TOKEN based scoring plan",
+      },
+    }));
+
+    assert.equal(result.allowed, true);
+  });
+
   it("returns policy copies so callers cannot mutate manager state", () => {
     const returned = manager.getPolicy();
     returned.allowed_types.length = 0;
