@@ -61,8 +61,9 @@ async function waitForDaemon(port: number, maxMs = 15000): Promise<void> {
 }
 
 function startDaemon(agentId: string, orgId: string, port: number, dataDir: string): ChildProcess {
-  const proc = spawn("npx", [
-    "tsx", "src/daemon/server.ts",
+  const proc = spawn(process.execPath, [
+    "--import", "tsx",
+    "src/daemon/server.ts",
     "--agent-id", agentId,
     "--org-id", orgId,
     "--namespace", NAMESPACE,
