@@ -49,6 +49,13 @@ export function validateTransport(
   // Check expiry
   if (envelope.expires_at) {
     const expiresAt = new Date(envelope.expires_at);
+    if (Number.isNaN(expiresAt.getTime())) {
+      return {
+        valid: false,
+        error: "Invalid expiry timestamp",
+        errorCode: "invalid_schema",
+      };
+    }
     if (expiresAt < new Date()) {
       return {
         valid: false,

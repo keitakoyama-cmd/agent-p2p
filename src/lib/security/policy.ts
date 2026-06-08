@@ -49,6 +49,36 @@ const DEFAULT_POLICY: TaskPolicy = {
   scan_only: false,
 };
 
+function clonePolicy(policy: TaskPolicy): TaskPolicy {
+  return {
+    ...policy,
+    allowed_types: [...policy.allowed_types],
+    blocked_paths: [...policy.blocked_paths],
+    blocked_env_patterns: [...policy.blocked_env_patterns],
+  };
+}
+
+function clonePolicyUpdate(update: Partial<TaskPolicy>): Partial<TaskPolicy> {
+  const cloned = { ...update };
+  if (update.allowed_types) cloned.allowed_types = [...update.allowed_types];
+  if (update.blocked_paths) cloned.blocked_paths = [...update.blocked_paths];
+  if (update.blocked_env_patterns) {
+    cloned.blocked_env_patterns = [...update.blocked_env_patterns];
+  }
+  return cloned;
+}
+
+function mergePolicy(
+  policy: TaskPolicy,
+  update?: Partial<TaskPolicy>
+): TaskPolicy {
+  return clonePolicy({ ...policy, ...clonePolicyUpdate(update ?? {}) });
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export class TaskPolicyManager extends EventEmitter {
   private agentId: AgentId;
   private policy: TaskPolicy;
@@ -58,7 +88,7 @@ export class TaskPolicyManager extends EventEmitter {
   constructor(agentId: AgentId, policy?: Partial<TaskPolicy>) {
     super();
     this.agentId = agentId;
-    this.policy = { ...DEFAULT_POLICY, ...policy };
+    this.policy = mergePolicy(DEFAULT_POLICY, policy);
   }
 
   // ============================================================
@@ -66,16 +96,16 @@ export class TaskPolicyManager extends EventEmitter {
   // ============================================================
 
   getPolicy(): TaskPolicy {
-    return { ...this.policy };
+    return clonePolicy(this.policy);
   }
 
   updatePolicy(update: Partial<TaskPolicy>): void {
-    this.policy = { ...this.policy, ...update };
-    this.emit("policy:updated", this.policy);
+    this.policy = mergePolicy(this.policy, update);
+    this.emit("policy:updated", this.getPolicy());
   }
 
   setPeerOverride(peerId: AgentId, override: Partial<TaskPolicy>): void {
-    this.peerOverrides.set(peerId, override);
+    this.peerOverrides.set(peerId, clonePolicyUpdate(override));
   }
 
   removePeerOverride(peerId: AgentId): void {
@@ -86,7 +116,7 @@ export class TaskPolicyManager extends EventEmitter {
   getPolicyForPeer(peerId: AgentId): TaskPolicy {
     const override = this.peerOverrides.get(peerId);
     if (!override) return this.getPolicy();
-    return { ...this.policy, ...override };
+    return mergePolicy(this.policy, override);
   }
 
   // ============================================================
@@ -159,7 +189,7 @@ export class TaskPolicyManager extends EventEmitter {
 
     if (typeof value === "string") {
       for (const blocked of blockedPaths) {
-        if (value.includes(blocked)) {
+        if (this.containsBlockedPath(value, blocked)) {
           threats.push({
             category: "credential_access",
             pattern: `blocked path: ${blocked}`,
@@ -181,6 +211,21 @@ export class TaskPolicyManager extends EventEmitter {
     return threats;
   }
 
+  private containsBlockedPath(value: string, blocked: string): boolean {
+    if (blocked.length === 0) return false;
+
+    const escaped = escapeRegExp(blocked);
+    const boundary = String.raw`(?:^|[\s"'=,:;])`;
+    const pathEnd = String.raw`(?=$|[\/\s"'=,:;])`;
+
+    if (blocked.startsWith(".")) {
+      const segmentBoundary = String.raw`(?:^|[\/\s"'=,:;])`;
+      return new RegExp(`${segmentBoundary}${escaped}${pathEnd}`).test(value);
+    }
+
+    return new RegExp(`${boundary}${escaped}${pathEnd}`).test(value);
+  }
+
   // ============================================================
   // Serialization
   // ============================================================
@@ -188,16 +233,16 @@ export class TaskPolicyManager extends EventEmitter {
   serialize(): { policy: TaskPolicy; overrides: Record<string, Partial<TaskPolicy>> } {
     const overrides: Record<string, Partial<TaskPolicy>> = {};
     for (const [k, v] of this.peerOverrides) {
-      overrides[k] = v;
+      overrides[k] = clonePolicyUpdate(v);
     }
-    return { policy: this.policy, overrides };
+    return { policy: this.getPolicy(), overrides };
   }
 
   load(data: { policy?: TaskPolicy; overrides?: Record<string, Partial<TaskPolicy>> }): void {
-    if (data.policy) this.policy = { ...DEFAULT_POLICY, ...data.policy };
+    if (data.policy) this.policy = mergePolicy(DEFAULT_POLICY, data.policy);
     if (data.overrides) {
       for (const [k, v] of Object.entries(data.overrides)) {
-        this.peerOverrides.set(k, v);
+        this.peerOverrides.set(k, clonePolicyUpdate(v));
       }
     }
   }

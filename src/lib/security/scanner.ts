@@ -24,12 +24,17 @@ const PATTERNS: PatternDef[] = [
   { category: "credential_access", pattern: /~?\/?\.gnupg\b/i, name: ".gnupg directory" },
   { category: "credential_access", pattern: /~?\/?\.kube\b/i, name: ".kube directory" },
   { category: "credential_access", pattern: /~?\/?\.docker\/config\b/i, name: ".docker/config" },
+  { category: "credential_access", pattern: /~?\/?\.npmrc\b/i, name: ".npmrc auth file" },
+  { category: "credential_access", pattern: /~?\/?\.netrc\b/i, name: ".netrc auth file" },
   { category: "credential_access", pattern: /\/etc\/(shadow|gshadow)\b/i, name: "/etc/shadow" },
+  { category: "credential_access", pattern: /\/etc\/passwd\b/i, name: "/etc/passwd" },
+  { category: "credential_access", pattern: /\/proc\/(?:self|[0-9]+)\/environ\b/i, name: "process environment file" },
   { category: "credential_access", pattern: /\bprivate[_\s-]?key\b/i, name: "private key reference" },
   { category: "credential_access", pattern: /\bsecret[_\s-]?key\b/i, name: "secret key reference" },
   { category: "credential_access", pattern: /\b(api[_\s-]?key|api[_\s-]?token|access[_\s-]?token)\b/i, name: "API key/token reference" },
+  { category: "credential_access", pattern: /\b(?:AWS_(?:ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN)|GITHUB_TOKEN|OPENAI_API_KEY|NPM_TOKEN|DATABASE_URL|PGPASSWORD)\b/, name: "sensitive environment variable" },
   { category: "credential_access", pattern: /\.(pem|key|p12|pfx|jks)\b/i, name: "key file extension" },
-  { category: "credential_access", pattern: /(?:^|\s|\/|\b)\.env\b/, name: ".env file" },
+  { category: "credential_access", pattern: /(?:^|[\s/])\.env(?:\.(?:local|production|development|test))?(?=$|[\s/"'=])/i, name: ".env file" },
   { category: "credential_access", pattern: /\bcredentials?\b.*\b(file|read|cat|send|return|output)\b/i, name: "credential file operation" },
   { category: "credential_access", pattern: /\b(read|cat|send|return|output)\b.*\bcredentials?\b/i, name: "credential file operation (reversed)" },
   { category: "credential_access", pattern: /\bkeychain\b/i, name: "keychain access" },
@@ -41,6 +46,8 @@ const PATTERNS: PatternDef[] = [
   { category: "command_injection", pattern: /\beval\s*[\(\$]/i, name: "eval execution" },
   { category: "command_injection", pattern: /\bexec\s*[\(\$]/i, name: "exec execution" },
   { category: "command_injection", pattern: /\bsource\s+<\s*\(/i, name: "source process substitution" },
+  { category: "command_injection", pattern: /\b(?:ba|z)?sh\s+-c\b/i, name: "shell -c execution" },
+  { category: "command_injection", pattern: /\bpowershell(?:\.exe)?\b.*(?:^|\s)-(?:enc|encodedcommand)\b/i, name: "PowerShell encoded command" },
   { category: "command_injection", pattern: /\bbase64\s+(-d|--decode)\b/i, name: "base64 decode execution" },
   { category: "command_injection", pattern: /\bpython\s+-c\b/i, name: "python -c injection" },
   { category: "command_injection", pattern: /\bnode\s+-e\b/i, name: "node -e injection" },
@@ -53,7 +60,7 @@ const PATTERNS: PatternDef[] = [
   { category: "data_exfiltration", pattern: /https?:\/\/.*\b(collect|exfil|receive|upload|webhook)\b/i, name: "suspicious exfiltration URL" },
   { category: "data_exfiltration", pattern: /\bbase64\b.*\b(encode|credentials?|secret|key|token)\b/i, name: "base64 encode sensitive data" },
   { category: "data_exfiltration", pattern: /\b(credentials?|secret|key|token)\b.*\bbase64\b/i, name: "sensitive data base64 (reversed)" },
-  { category: "data_exfiltration", pattern: /\bnccat?\b.*-[elvp]/i, name: "netcat reverse shell" },
+  { category: "data_exfiltration", pattern: /\b(?:nc|ncat|netcat)\b.*-[^\s]*[elvp]\b/i, name: "netcat reverse shell" },
   { category: "data_exfiltration", pattern: /\b\/dev\/(tcp|udp)\b/i, name: "/dev/tcp reverse connection" },
 
   // --- Path Traversal ---
@@ -120,7 +127,9 @@ export class TaskScanner {
       }
     } else if (value && typeof value === "object") {
       for (const [key, val] of Object.entries(value)) {
-        this.scanValue(val, `${path}.${key}`, patterns, threats);
+        const keyPath = `${path}.${key}`;
+        this.scanString(key, keyPath, patterns, threats);
+        this.scanValue(val, keyPath, patterns, threats);
       }
     }
   }
