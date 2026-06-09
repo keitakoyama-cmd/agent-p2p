@@ -93,6 +93,7 @@ const MODEL_TIERS: Record<string, CapabilityTier> = {
   "claude-sonnet-4-6": "mid",
   "claude-sonnet-4-5-20250514": "mid",
   "claude-haiku-4-5-20251001": "light",
+  "gpt-5.5": "high",
   "gpt-5.4": "high",
   "gpt-4.1": "mid",
   "gpt-4.1-mini": "light",
