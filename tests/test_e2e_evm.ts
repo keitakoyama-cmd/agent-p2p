@@ -22,6 +22,10 @@ describe("EVM On-Chain E2E (Ganache)", () => {
   let contractAddress: string;
 
   before(async () => {
+    // ganache@7.9.2 ships a broken "types" field ("api-extractor run"), so the
+    // default export's server() options arg is mistyped as `undefined`. The call
+    // is correct at runtime; suppress the spurious type error until upstream fixes it.
+    // @ts-expect-error - ganache options arg mistyped due to broken package types
     server = ganache.server({ wallet: { totalAccounts: 2 } });
     await server.listen(PORT);
 

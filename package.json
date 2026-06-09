@@ -7,8 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "npx tsx --test tests/test_matching.ts tests/test_security_policy.ts tests/test_reputation.ts tests/test_verification.ts tests/test_economic.ts tests/test_marketplace.ts",
-    "test:e2e": "npx tsx --test tests/test_e2e_security.ts",
+    "test": "node --import tsx --test tests/test_matching.ts tests/test_security_policy.ts tests/test_reputation.ts tests/test_verification.ts tests/test_economic.ts tests/test_marketplace.ts tests/test_crypto_signing.ts tests/test_validation_edges.ts tests/test_security_edges.ts tests/test_state_machine_edges.ts tests/test_relay.ts tests/test_protocol.ts",
+    "test:e2e": "node --import tsx --test tests/test_e2e_security.ts",
     "test:all": "npm test && npm run test:e2e",
     "typecheck": "tsc --noEmit"
   },

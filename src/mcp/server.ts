@@ -721,7 +721,7 @@ async function main() {
 
   // --- Task notification poller ---
   // Poll daemon for new incoming tasks and notify Claude Code via MCP resource update
-  let _lastSeenTaskIds = new Set<string>();
+  const _lastSeenTaskIds = new Set<string>();
   async function pollIncomingTasks() {
     try {
       const res = (await daemonGet("/task/list")) as { tasks?: Array<{ task_id: string; from: string; status: string; request?: { type?: string; description?: string }; created_at?: number }> };
