@@ -47,6 +47,12 @@ import { generateIcon } from "../lib/ai/image";
 import { checkBearerAuth, json, loadOrCreateApiToken, readBody } from "./http-util";
 import { loadEconomicState, saveEconomicState } from "./economic-state";
 import { getSigningKey } from "./signing";
+import { handleEconomic } from "./routes/economic";
+import { handlePolicy } from "./routes/policy";
+import { handleProfile } from "./routes/profile";
+import { handleReputation } from "./routes/reputation";
+import { handleVerification } from "./routes/verification";
+import type { DaemonContext, RequestContext } from "./context";
 import type { P2PSwarm, PeerConnection } from "../lib/p2p/swarm";
 import type { Project } from "../lib/project/manager";
 import type {
@@ -54,7 +60,6 @@ import type {
   AuctionRecord,
   AuctionStatus,
   ConnectionMode,
-  ExecutionProof,
   Heartbeat,
   InvoiceIssuePayload,
   OrgId,
@@ -135,28 +140,14 @@ function serializeAuction(auction: AuctionRecord, auctionOrigins: Map<string, Ag
   };
 }
 
-function createDaemonApi(
-  agent: P2PAgent,
-  port: number,
-  inviteManager: InviteManager,
-  apiToken: string,
-  taskManager: TaskManager,
-  planner: TaskPlanner,
-  reputation: ReputationManager,
-  verifier: ExecutionVerifier,
-  economic: EconomicManager,
-  auction: AuctionManager,
-  auctionOrigins: Map<string, AgentId>,
-  billing: BillingPlugin | null,
-  profileManager: ProfileManager,
-  taskPolicy: TaskPolicyManager,
-  dataDir: string,
-  solana: SolanaClient,
-  solanaKeypair: import("@solana/web3.js").Keypair,
-  pumpfun: PumpFunClient,
-  projectManager: ProjectManager,
-  webhooks: Array<{ id: string; url: string; events: string[]; created_at: string }>
-) {
+function createDaemonApi(ctx: DaemonContext) {
+  const {
+    agent, port, inviteManager, apiToken, taskManager, planner, reputation,
+    verifier, economic, auction, auctionOrigins, billing, profileManager,
+    taskPolicy, dataDir, solana, solanaKeypair, pumpfun, projectManager, webhooks,
+  } = ctx;
+  void verifier;
+  void taskPolicy;
   const server = createServer(async (req, res) => {
     // Only accept from localhost
     const remoteAddr = req.socket.remoteAddress;
@@ -167,6 +158,7 @@ function createDaemonApi(
 
     const url = new URL(req.url ?? "/", `http://localhost:${port}`);
     const path = url.pathname;
+    const rc: RequestContext = { req, res, url, path };
 
     // Allow /health without auth (for monitoring)
     if (req.method === "GET" && path === "/health") {
@@ -513,261 +505,19 @@ function createDaemonApi(
       // Reputation routes
       // ============================================================
 
-      if (req.method === "GET" && path === "/reputation") {
-        const agentIdParam = url.searchParams.get("agent_id") as AgentId | null;
-        if (agentIdParam) {
-          const record = reputation.getRecord(agentIdParam);
-          json(res, record ? 200 : 404, record || { error: "No reputation record" });
-        } else {
-          json(res, 200, { records: reputation.listRecords() });
-        }
-        return;
-      }
-
-      if (req.method === "GET" && path === "/reputation/policy") {
-        json(res, 200, reputation.getPolicy());
-        return;
-      }
-
-      if (req.method === "POST" && path === "/reputation/policy") {
-        const body = JSON.parse(await readBody(req));
-        reputation.setPolicy(body);
-        json(res, 200, reputation.getPolicy());
-        return;
-      }
+      if (await handleReputation(ctx, rc)) return;
 
       // ============================================================
       // Execution Verification routes
       // ============================================================
 
-      if (req.method === "POST" && path === "/verification/challenge") {
-        const body = JSON.parse(await readBody(req));
-        const challenge = verifier.createChallenge(body.task_id, body.ttl_ms);
-        json(res, 200, challenge);
-        return;
-      }
-
-      if (req.method === "POST" && path === "/verification/prove") {
-        const body = JSON.parse(await readBody(req));
-        const privateKey = await getSigningKey(agent);
-        const keyId = agent.getKeyId() || "unknown";
-        const proof = verifier.createProof(
-          body.task_id,
-          body.input,
-          body.output,
-          privateKey,
-          keyId,
-          body.challenge
-        );
-        json(res, 200, proof);
-        return;
-      }
-
-      if (req.method === "POST" && path === "/verification/verify") {
-        const body = JSON.parse(await readBody(req));
-        const proof = body.proof as ExecutionProof;
-        const workerPubKey = (await import("../lib/crypto/keys")).fromBase64(body.worker_public_key);
-        const result = verifier.verifyProof(proof, body.expected_input, body.received_output, workerPubKey);
-        // Update reputation based on verification
-        if (proof.signature?.key_id) {
-          const workerAgentId = body.worker_agent_id as AgentId;
-          if (workerAgentId) {
-            if (result.valid) {
-              reputation.recordVerifiedProof(workerAgentId);
-            }
-          }
-        }
-        json(res, 200, result);
-        return;
-      }
-
-      if (req.method === "GET" && path === "/verification/proof") {
-        const taskId = url.searchParams.get("task_id");
-        if (taskId) {
-          const proof = verifier.getProof(taskId);
-          json(res, proof ? 200 : 404, proof || { error: "No proof found" });
-        } else {
-          json(res, 200, { proofs: verifier.listProofs() });
-        }
-        return;
-      }
+      if (await handleVerification(ctx, rc)) return;
 
       // ============================================================
-      // Economic routes — Tokens
+      // Economic routes
       // ============================================================
 
-      if (req.method === "POST" && path === "/token/issue") {
-        const body = JSON.parse(await readBody(req));
-        const privateKey = await getSigningKey(agent);
-        const keyId = agent.getKeyId() || "unknown";
-        const token = economic.issueToken(
-          body.name, body.symbol, body.decimals || 18,
-          body.initial_supply || 0, privateKey, keyId
-        );
-        saveEconomicState(dataDir, economic);
-        json(res, 200, token);
-        return;
-      }
-
-      if (req.method === "POST" && path === "/token/register") {
-        const body = JSON.parse(await readBody(req));
-        const token = economic.registerExternalToken(
-          body.token_id, body.name, body.symbol,
-          body.decimals || 18, body.chain, body.contract_address
-        );
-        saveEconomicState(dataDir, economic);
-        json(res, 200, token);
-        return;
-      }
-
-      if (req.method === "GET" && path === "/token/list") {
-        json(res, 200, { tokens: economic.listTokens() });
-        return;
-      }
-
-      if (req.method === "POST" && path === "/token/mint") {
-        const body = JSON.parse(await readBody(req));
-        const privateKey = await getSigningKey(agent);
-        const keyId = agent.getKeyId() || "unknown";
-        const result = economic.mint(body.token_id, body.amount, privateKey, keyId);
-        if (result.success) saveEconomicState(dataDir, economic);
-        json(res, result.success ? 200 : 422, result);
-        return;
-      }
-
-      if (req.method === "POST" && path === "/token/transfer") {
-        const body = JSON.parse(await readBody(req));
-        const privateKey = await getSigningKey(agent);
-        const keyId = agent.getKeyId() || "unknown";
-        const myAgentId = agent.getAgentInfo().agent_id;
-        const toAgentId = body.to as AgentId;
-        const result = economic.transfer(toAgentId, body.token_id, body.amount, privateKey, keyId);
-        if (result.success) {
-          saveEconomicState(dataDir, economic);
-          // Notify recipient via P2P so they can credit their local ledger
-          const swarm = agent.getSwarm();
-          const lastEntry = economic.getLedger(1)[0];
-          swarm.sendTaskMessage(toAgentId, "token_transfer", {
-            from: myAgentId,
-            to: toAgentId,
-            token_id: body.token_id,
-            amount: body.amount,
-            ledger_entry: lastEntry,
-          });
-        }
-        json(res, result.success ? 200 : 422, result);
-        return;
-      }
-
-      // ============================================================
-      // Economic routes — Wallet
-      // ============================================================
-
-      if (req.method === "GET" && path === "/wallet") {
-        const myAgentId = agent.getAgentInfo().agent_id;
-        const agentIdParam = url.searchParams.get("agent_id") as AgentId || myAgentId;
-        const wallet = economic.getWallet(agentIdParam);
-        json(res, wallet ? 200 : 404, wallet || { error: "No wallet" });
-        return;
-      }
-
-      if (req.method === "POST" && path === "/wallet/connect") {
-        const body = JSON.parse(await readBody(req));
-        const myAgentId = agent.getAgentInfo().agent_id;
-        const wallet = economic.connectWallet(myAgentId, body.chain, body.address);
-        json(res, 200, wallet);
-        return;
-      }
-
-      if (req.method === "GET" && path === "/wallet/balance") {
-        const tokenId = url.searchParams.get("token_id");
-        const myAgentId = agent.getAgentInfo().agent_id;
-        const agentIdParam = url.searchParams.get("agent_id") as AgentId || myAgentId;
-        if (!tokenId) { json(res, 400, { error: "token_id required" }); return; }
-        json(res, 200, { balance: economic.getBalance(agentIdParam, tokenId) });
-        return;
-      }
-
-      // ============================================================
-      // Economic routes — Offers & Escrow
-      // ============================================================
-
-      if (req.method === "POST" && path === "/offer/create") {
-        const body = JSON.parse(await readBody(req));
-        const offer = economic.createOffer(body.task_id, body.to as AgentId, body.token_id, body.amount);
-        saveEconomicState(dataDir, economic);
-        json(res, 200, offer);
-        return;
-      }
-
-      if (req.method === "GET" && path === "/offer/list") {
-        json(res, 200, { offers: economic.listOffers() });
-        return;
-      }
-
-      if (req.method === "POST" && path === "/escrow/lock") {
-        const body = JSON.parse(await readBody(req));
-        const privateKey = await getSigningKey(agent);
-        const keyId = agent.getKeyId() || "unknown";
-        const result = economic.lockEscrow(body.offer_id, privateKey, keyId);
-        if (result.success) saveEconomicState(dataDir, economic);
-        json(res, result.success ? 200 : 422, result);
-        return;
-      }
-
-      if (req.method === "POST" && path === "/escrow/release") {
-        const body = JSON.parse(await readBody(req));
-        const privateKey = await getSigningKey(agent);
-        const keyId = agent.getKeyId() || "unknown";
-        const result = economic.releaseEscrow(body.escrow_id, body.proof_id, privateKey, keyId);
-        // Update reputation on payment release
-        const escrow = economic.getEscrow(body.escrow_id);
-        if (result.success && escrow) {
-          reputation.recordTaskCompleted(escrow.to, 0, 0);
-        }
-        if (result.success) saveEconomicState(dataDir, economic);
-        json(res, result.success ? 200 : 422, result);
-        return;
-      }
-
-      if (req.method === "POST" && path === "/escrow/refund") {
-        const body = JSON.parse(await readBody(req));
-        const privateKey = await getSigningKey(agent);
-        const keyId = agent.getKeyId() || "unknown";
-        const result = economic.refundEscrow(body.escrow_id, privateKey, keyId);
-        if (result.success) saveEconomicState(dataDir, economic);
-        json(res, result.success ? 200 : 422, result);
-        return;
-      }
-
-      if (req.method === "POST" && path === "/escrow/dispute") {
-        const body = JSON.parse(await readBody(req));
-        const result = economic.disputeEscrow(body.escrow_id);
-        // Record dispute in reputation
-        const escrow = economic.getEscrow(body.escrow_id);
-        if (escrow) {
-          reputation.recordDispute(escrow.to);
-        }
-        if (result.success) saveEconomicState(dataDir, economic);
-        json(res, result.success ? 200 : 422, result);
-        return;
-      }
-
-      if (req.method === "GET" && path === "/escrow/list") {
-        json(res, 200, { escrows: economic.listEscrows() });
-        return;
-      }
-
-      if (req.method === "GET" && path === "/ledger") {
-        const limit = parseInt(url.searchParams.get("limit") || "50", 10);
-        json(res, 200, { entries: economic.getLedger(limit) });
-        return;
-      }
-
-      if (req.method === "GET" && path === "/ledger/verify") {
-        json(res, 200, economic.verifyLedgerIntegrity());
-        return;
-      }
+      if (await handleEconomic(ctx, rc)) return;
 
       // ============================================================
       // Solana on-chain routes
@@ -1285,68 +1035,13 @@ function createDaemonApi(
       // Security Policy routes
       // ============================================================
 
-      if (req.method === "GET" && path === "/policy") {
-        json(res, 200, taskPolicy.serialize());
-        return;
-      }
-
-      if (req.method === "POST" && path === "/policy") {
-        const body = JSON.parse(await readBody(req));
-        if (body.policy) taskPolicy.updatePolicy(body.policy);
-        if (body.peer_override) {
-          const { peer_id, ...override } = body.peer_override;
-          if (peer_id) taskPolicy.setPeerOverride(peer_id, override);
-        }
-        json(res, 200, taskPolicy.serialize());
-        return;
-      }
-
-      if (req.method === "POST" && path === "/policy/check") {
-        const body = JSON.parse(await readBody(req));
-        if (!body.from || !body.task) {
-          json(res, 400, { error: "from (AgentId) and task (TaskRequest) are required" });
-          return;
-        }
-        const result = taskPolicy.checkTask(body.from, body.task);
-        json(res, 200, result);
-        return;
-      }
+      if (await handlePolicy(ctx, rc)) return;
 
       // ============================================================
       // Profile & Matching routes
       // ============================================================
 
-      if (req.method === "GET" && path === "/profile") {
-        json(res, 200, profileManager.getLocalProfile());
-        return;
-      }
-
-      if (req.method === "POST" && path === "/profile") {
-        const body = JSON.parse(await readBody(req));
-        if (body.skills) profileManager.updateSkills(body.skills);
-        if (body.availability) profileManager.setAvailability(body.availability);
-        if (body.capability_tier) profileManager.setCapabilityTier(body.capability_tier);
-        if (body.task_types) profileManager.setTaskTypes(body.task_types);
-        json(res, 200, profileManager.getLocalProfile());
-        return;
-      }
-
-      if (req.method === "POST" && path === "/match") {
-        const body = JSON.parse(await readBody(req));
-        if (!body.required_skills || !Array.isArray(body.required_skills)) {
-          json(res, 400, { error: "required_skills array is required" });
-          return;
-        }
-        const minScore = body.min_score ?? 0;
-        const matches = profileManager.findMatchingPeers(body.required_skills, minScore);
-        json(res, 200, { matches });
-        return;
-      }
-
-      if (req.method === "GET" && path === "/peers/profiles") {
-        json(res, 200, { profiles: profileManager.getAllPeerProfiles() });
-        return;
-      }
+      if (await handleProfile(ctx, rc)) return;
 
       // ============================================================
       // Auction routes
@@ -1977,9 +1672,9 @@ async function main() {
     console.error(`[Plan] ${planId} ${status}`);
   });
 
-  const httpServer = createDaemonApi(
+  const httpServer = createDaemonApi({
     agent,
-    config.port,
+    port: config.port,
     inviteManager,
     apiToken,
     taskManager,
@@ -1992,13 +1687,13 @@ async function main() {
     billing,
     profileManager,
     taskPolicy,
-    config.dataDir,
+    dataDir: config.dataDir,
     solana,
     solanaKeypair,
     pumpfun,
     projectManager,
-    webhooks
-  );
+    webhooks,
+  });
 
   // Discovery site integration
   let discovery: DiscoveryClient | null = null;
