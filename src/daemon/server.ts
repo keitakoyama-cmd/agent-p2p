@@ -25,15 +25,14 @@
  */
 
 import { createServer, IncomingMessage, ServerResponse } from "http";
-import { readdirSync, statSync } from "fs";
 import { join } from "path";
 import { P2PAgent } from "../agent/core";
 import { BillingPlugin } from "../agent/billing";
 import { DiscoveryClient, type ConnectionRequest } from "../lib/discovery/client";
 import { InviteManager, type InviteResult } from "../lib/invite/manager";
 import { AuctionManager } from "../lib/marketplace/auction";
-import { TaskManager, type TrackedTask } from "../lib/task/manager";
-import { TaskPlanner, type Plan } from "../lib/task/planner";
+import { TaskManager } from "../lib/task/manager";
+import { TaskPlanner } from "../lib/task/planner";
 import { ReputationManager } from "../lib/reputation/manager";
 import { ExecutionVerifier } from "../lib/verification/prover";
 import { EconomicManager } from "../lib/economic/wallet";
@@ -43,23 +42,25 @@ import { TaskPolicyManager } from "../lib/security/policy";
 import { SolanaClient } from "../lib/chain/solana";
 import { PumpFunClient } from "../lib/chain/pumpfun";
 import { ProjectManager } from "../lib/project/manager";
-import { generateIcon } from "../lib/ai/image";
 import { checkBearerAuth, json, loadOrCreateApiToken, readBody } from "./http-util";
 import { loadEconomicState, saveEconomicState } from "./economic-state";
 import { getSigningKey } from "./signing";
+import { handleAuction } from "./routes/auction";
+import { handleCore } from "./routes/core";
 import { handleEconomic } from "./routes/economic";
+import { handleInvite } from "./routes/invite";
+import { handleMessaging } from "./routes/messaging";
+import { handlePeers } from "./routes/peers";
 import { handlePolicy } from "./routes/policy";
 import { handleProfile } from "./routes/profile";
+import { handleProject } from "./routes/project";
 import { handleReputation } from "./routes/reputation";
+import { handleTasks } from "./routes/tasks";
 import { handleVerification } from "./routes/verification";
+import { handleWebhooks } from "./routes/webhooks";
 import type { DaemonContext, RequestContext } from "./context";
-import type { P2PSwarm, PeerConnection } from "../lib/p2p/swarm";
-import type { Project } from "../lib/project/manager";
 import type {
   AgentId,
-  AuctionRecord,
-  AuctionStatus,
-  ConnectionMode,
   Heartbeat,
   InvoiceIssuePayload,
   OrgId,
@@ -67,7 +68,6 @@ import type {
   TaskAward,
   TaskBid,
   TaskBroadcast,
-  TaskStatus,
 } from "../types/protocol";
 
 // --- Parse CLI args ---
@@ -99,55 +99,10 @@ function parseArgs() {
   };
 }
 
-function broadcastAuctionTask(agent: P2PAgent, broadcast: TaskBroadcast): number {
-  const swarm: P2PSwarm = agent.getSwarm();
-  if (typeof swarm.broadcastTask === "function") {
-    return swarm.broadcastTask(broadcast);
-  }
-
-  const peers: PeerConnection[] = typeof swarm.getConnectedPeers === "function" ? swarm.getConnectedPeers() : [];
-  let sent = 0;
-  for (const peer of peers) {
-    if (!peer.connected || peer.verified === false || !peer.agentId) continue;
-    if (swarm.sendTaskMessage(peer.agentId, "task_broadcast", broadcast)) {
-      sent++;
-    }
-  }
-  return sent;
-}
-
-function buildAuctionAward(auction: AuctionRecord): TaskAward | null {
-  if (!auction.winner_bid_id || !auction.winner_agent_id || !auction.awarded_at) {
-    return null;
-  }
-
-  const winningBid = auction.bids.find((bid) => bid.bid_id === auction.winner_bid_id);
-  if (!winningBid) return null;
-
-  return {
-    task_id: auction.task_id,
-    bid_id: auction.winner_bid_id,
-    awarded_to: auction.winner_agent_id,
-    agreed_price: winningBid.price,
-    awarded_at: auction.awarded_at,
-  };
-}
-
-function serializeAuction(auction: AuctionRecord, auctionOrigins: Map<string, AgentId>) {
-  return {
-    ...auction,
-    issuer_agent_id: auctionOrigins.get(auction.task_id) ?? null,
-  };
-}
-
 function createDaemonApi(ctx: DaemonContext) {
   const {
-    agent, port, inviteManager, apiToken, taskManager, planner, reputation,
-    verifier, economic, auction, auctionOrigins, billing, profileManager,
-    taskPolicy, dataDir, solana, solanaKeypair, pumpfun, projectManager, webhooks,
+    agent, port, apiToken, economic, billing, dataDir, solana, solanaKeypair, pumpfun,
   } = ctx;
-  void verifier;
-  void taskPolicy;
   const server = createServer(async (req, res) => {
     // Only accept from localhost
     const remoteAddr = req.socket.remoteAddress;
@@ -180,18 +135,7 @@ function createDaemonApi(ctx: DaemonContext) {
     try {
       // --- Routes ---
 
-      if (req.method === "GET" && path === "/info") {
-        json(res, 200, {
-          ...agent.getAgentInfo(),
-          billing_enabled: billing !== null,
-        });
-        return;
-      }
-
-      if (req.method === "GET" && path === "/peers") {
-        json(res, 200, agent.getConnectedPeers());
-        return;
-      }
+      if (await handleCore(ctx, rc)) return;
 
       // --- Billing (legacy, optional plugin) routes ---
 
@@ -251,255 +195,13 @@ function createDaemonApi(ctx: DaemonContext) {
         }
       }
 
-      if (req.method === "GET" && path === "/inbox") {
-        json(res, 200, agent.getInbox());
-        return;
-      }
+      if (await handleMessaging(ctx, rc)) return;
 
-      if (req.method === "POST" && path === "/inbox/process") {
-        json(res, 200, agent.processNextInboxMessage());
-        return;
-      }
+      if (await handleInvite(ctx, rc)) return;
 
-      if (req.method === "POST" && path === "/file/send") {
-        const body = JSON.parse(await readBody(req));
-        const result = agent.sendFile(
-          body.target_agent_id as AgentId,
-          body.file_path
-        );
-        json(res, result.success ? 200 : 422, result);
-        return;
-      }
+      if (await handleTasks(ctx, rc)) return;
 
-      if (req.method === "GET" && path === "/file/received") {
-        const dataDir = agent.getDataDir() || "";
-        const dir = join(dataDir, "received");
-        try {
-          const files = readdirSync(dir).map(f => ({
-            name: f,
-            size: statSync(join(dir, f)).size,
-          }));
-          json(res, 200, { files, directory: dir });
-        } catch {
-          json(res, 200, { files: [], directory: dir });
-        }
-        return;
-      }
-
-      // --- Invite routes ---
-
-      if (req.method === "POST" && path === "/invite/create") {
-        const body = await readBody(req);
-        const parsed = body ? JSON.parse(body) : {};
-        const expiresIn = Math.min(Math.max(parsed.expires_in || 600, 60), 86400);
-        const mode = parsed.mode || "restricted";
-        const invite = await inviteManager.create(expiresIn, mode);
-        json(res, 200, invite);
-        return;
-      }
-
-      if (req.method === "POST" && path === "/invite/accept") {
-        const body = JSON.parse(await readBody(req));
-        if (!body.code) { json(res, 400, { error: "code required" }); return; }
-        const result = await inviteManager.accept(body.code, body.mode || "restricted");
-        json(res, result.success ? 200 : 400, result);
-        return;
-      }
-
-      if (req.method === "GET" && path === "/invite/pending") {
-        json(res, 200, { invites: inviteManager.listPending() });
-        return;
-      }
-
-      // --- Task routes ---
-
-      if (req.method === "POST" && path === "/task/request") {
-        const body = JSON.parse(await readBody(req));
-        const targetId = body.target_agent_id as AgentId;
-        const perm = taskManager.checkPermission(targetId, "task", "request");
-        if (!perm.allowed) { json(res, 403, { error: "Not permitted to request tasks from this peer" }); return; }
-
-        const task = taskManager.createTask(targetId, {
-          type: body.type || "generic",
-          description: body.description || "",
-          input: body.input || {},
-          timeout_ms: body.timeout_ms,
-          priority: body.priority,
-        });
-
-        const sent = agent.getSwarm().sendTaskMessage(targetId, "task_request", task.request);
-        if (!sent) { json(res, 422, { error: "Peer not connected", task }); return; }
-
-        json(res, 200, { task, needs_approval: perm.needsApproval });
-        return;
-      }
-
-      if (req.method === "GET" && path === "/task/list") {
-        const status = url.searchParams.get("status") as TaskStatus | null;
-        json(res, 200, { tasks: taskManager.listTasks(status ?? undefined) });
-        return;
-      }
-
-      if (req.method === "GET" && path.startsWith("/task/") && path.split("/").length === 3) {
-        const taskId = path.split("/")[2];
-        const task = taskManager.getTask(taskId);
-        json(res, task ? 200 : 404, task || { error: "Task not found" });
-        return;
-      }
-
-      if (req.method === "POST" && path === "/task/respond") {
-        const body = JSON.parse(await readBody(req));
-        const { task_id, action } = body; // action: accept | reject | complete | fail | cancel
-        const task = taskManager.getTask(task_id);
-        if (!task) { json(res, 404, { error: "Task not found" }); return; }
-
-        if (action === "accept") {
-          taskManager.updateTaskStatus(task_id, "accepted");
-          agent.getSwarm().sendTaskMessage(task.from, "task_accept", { task_id });
-        } else if (action === "reject") {
-          taskManager.updateTaskStatus(task_id, "cancelled");
-          agent.getSwarm().sendTaskMessage(task.from, "task_reject", { task_id, reason: body.reason || "" });
-        } else if (action === "complete") {
-          const result = { task_id, status: "completed" as const, output: body.output || {}, duration_ms: Date.now() - task.created_at };
-          taskManager.updateTaskStatus(task_id, "completed", result);
-          agent.getSwarm().sendTaskMessage(task.from, "task_result", result);
-        } else if (action === "fail") {
-          taskManager.updateTaskStatus(task_id, "failed");
-          agent.getSwarm().sendTaskMessage(task.from, "task_error", { task_id, error_code: "TASK_FAILED", message: body.error || "Failed", retryable: body.retryable ?? false });
-        } else if (action === "cancel") {
-          taskManager.updateTaskStatus(task_id, "cancelled");
-          agent.getSwarm().sendTaskMessage(task.to === agent.getAgentInfo().agent_id ? task.from : task.to, "task_cancel", { task_id, reason: body.reason });
-        }
-        json(res, 200, taskManager.getTask(task_id));
-        return;
-      }
-
-      // --- Task Queue routes ---
-
-      if (req.method === "POST" && path === "/queue/enqueue") {
-        const body = JSON.parse(await readBody(req));
-        const task = taskManager.enqueue({
-          type: body.type || "generic",
-          description: body.description || "",
-          input: body.input || {},
-          timeout_ms: body.timeout_ms,
-          priority: body.priority,
-        }, body.assign_to);
-        json(res, 200, task);
-        return;
-      }
-
-      if (req.method === "GET" && path === "/queue") {
-        json(res, 200, { length: taskManager.queueLength(), tasks: taskManager.listTasks("pending") });
-        return;
-      }
-
-      if (req.method === "POST" && path === "/queue/dequeue") {
-        const body = await readBody(req);
-        const parsed = body ? JSON.parse(body) : {};
-        const task = taskManager.dequeue(agent.getAgentInfo().agent_id, parsed.capabilities);
-        json(res, task ? 200 : 204, task || { message: "No tasks available" });
-        return;
-      }
-
-      if (req.method === "POST" && path === "/worker/start") {
-        const body = await readBody(req);
-        const parsed = body ? JSON.parse(body) : {};
-        const intervalMs = parsed.interval_ms || 30000;
-        const targetPeers = taskManager.listPeers().map(p => p.agent_id);
-
-        taskManager.startWorker(
-          intervalMs,
-          async () => {
-            // Poll all connected peers for tasks
-            for (const peerId of targetPeers) {
-              agent.getSwarm().sendTaskMessage(peerId, "task_poll", {
-                capabilities: taskManager.buildHeartbeat().capabilities,
-              });
-            }
-            // Wait a bit for response
-            return new Promise<TrackedTask | null>((resolve) => {
-              const timer = setTimeout(() => resolve(null), 5000);
-              taskManager.once("worker:task_received", ({ task }: { task: TrackedTask }) => {
-                clearTimeout(timer);
-                resolve(task);
-              });
-            });
-          },
-          async (task) => {
-            // Emit event for external handler (MCP server / Claude Code)
-            taskManager.emit("worker:execute", task);
-            // Default: return success with empty output
-            // Real execution would be handled by the task handler
-            return { output: { message: "Task received, awaiting external execution" } };
-          }
-        );
-        json(res, 200, { status: "worker started", interval_ms: intervalMs, polling_peers: targetPeers });
-        return;
-      }
-
-      if (req.method === "POST" && path === "/worker/stop") {
-        taskManager.stopWorker();
-        json(res, 200, { status: "worker stopped" });
-        return;
-      }
-
-      // --- Plan routes ---
-
-      if (req.method === "POST" && path === "/plan/load") {
-        const body = JSON.parse(await readBody(req)) as Plan;
-        const state = planner.loadPlan(body);
-        json(res, 200, state);
-        return;
-      }
-
-      if (req.method === "POST" && path.match(/^\/plan\/([^/]+)\/start$/)) {
-        const planId = path.split("/")[2];
-        try {
-          planner.start(planId);
-          json(res, 200, planner.getPlan(planId));
-        } catch (e) {
-          json(res, 404, { error: (e as Error).message });
-        }
-        return;
-      }
-
-      if (req.method === "GET" && path === "/plan/list") {
-        json(res, 200, { plans: planner.listPlans() });
-        return;
-      }
-
-      if (req.method === "GET" && path.match(/^\/plan\/([^/]+)$/)) {
-        const planId = path.split("/")[2];
-        const state = planner.getPlan(planId);
-        json(res, state ? 200 : 404, state || { error: "Plan not found" });
-        return;
-      }
-
-      // --- Peer permission routes ---
-
-      if (req.method === "GET" && path === "/peers/config") {
-        json(res, 200, { peers: taskManager.listPeers() });
-        return;
-      }
-
-      if (req.method === "POST" && path === "/peers/config") {
-        const body = JSON.parse(await readBody(req));
-        const config = taskManager.setPeerConfig(
-          body.agent_id as AgentId,
-          (body.mode || "restricted") as ConnectionMode,
-          body.shared_namespace
-        );
-        json(res, 200, config);
-        return;
-      }
-
-      // --- Heartbeat ---
-
-      if (req.method === "GET" && path === "/heartbeat") {
-        json(res, 200, taskManager.buildHeartbeat());
-        return;
-      }
+      if (await handlePeers(ctx, rc)) return;
 
       // ============================================================
       // Reputation routes
@@ -717,204 +419,13 @@ function createDaemonApi(ctx: DaemonContext) {
       // Project (Virtual Company) routes
       // ============================================================
 
-      if (req.method === "POST" && path === "/project/create") {
-        try {
-          const body = JSON.parse(await readBody(req));
-          const myAgentId = agent.getAgentInfo().agent_id;
-          const { name, description, funding_goal, tasks, launch_on_pumpfun, image_base64,
-                  creator_name, icon_url, website, twitter, telegram, discord, github } = body;
-          if (!name || !tasks?.length) {
-            json(res, 400, { error: "name and tasks required" });
-            return;
-          }
-
-          let tokenId = body.token_id;
-          let mintAddress: string | undefined;
-          let pumpFunUrl: string | undefined;
-
-          // Optionally launch token on pump.fun
-          if (launch_on_pumpfun) {
-            let imageBuffer: Buffer;
-            if (image_base64) {
-              imageBuffer = Buffer.from(image_base64, "base64");
-            } else if (body.auto_generate_icon) {
-              console.error(`[Project] Generating icon via AI...`);
-              const iconResult = await generateIcon(name, body.symbol || "TOK", description || name);
-              if (iconResult.success && iconResult.buffer) {
-                imageBuffer = iconResult.buffer;
-                console.error(`[Project] Icon generated (${imageBuffer.length} bytes)`);
-              } else {
-                console.error(`[Project] Icon generation failed: ${iconResult.error}, using placeholder`);
-                imageBuffer = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==", "base64");
-              }
-            } else {
-              imageBuffer = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==", "base64");
-            }
-            const launchResult = await pumpfun.launch(
-              solanaKeypair, name, body.symbol || name.substring(0, 4).toUpperCase(),
-              description || name,
-              imageBuffer, "token.png", body.initial_buy_sol || 0,
-              { website, twitter, telegram }
-            );
-            if (launchResult.success) {
-              mintAddress = launchResult.mintAddress;
-              tokenId = `pumpfun:${mintAddress}`;
-              pumpFunUrl = launchResult.pumpFunUrl;
-              economic.registerExternalToken(tokenId, name, body.symbol || "TOK", 6, "solana", mintAddress);
-              saveEconomicState(dataDir, economic);
-            } else {
-              json(res, 422, { error: `Token launch failed: ${launchResult.error}` });
-              return;
-            }
-          }
-
-          // If no token provided, issue a local one
-          if (!tokenId) {
-            const privateKey = await getSigningKey(agent);
-            const keyId = agent.getKeyId() || "unknown";
-            const token = economic.issueToken(name, body.symbol || "TOK", 6, funding_goal || 1000000, privateKey, keyId);
-            tokenId = token.token_id;
-            saveEconomicState(dataDir, economic);
-          }
-
-          const project = projectManager.createProject(
-            myAgentId, name, description || "", tokenId, funding_goal || 0,
-            tasks, {
-              mintAddress,
-              symbol: body.symbol,
-              creatorName: creator_name,
-              iconUrl: icon_url,
-              links: { website, twitter, telegram, discord, github },
-            }
-          );
-
-          json(res, 200, { ...project, pump_fun_url: pumpFunUrl });
-        } catch (err) {
-          json(res, 500, { error: (err as Error).message });
-        }
-        return;
-      }
-
-      if (req.method === "POST" && path === "/project/fund") {
-        const body = JSON.parse(await readBody(req));
-        const investor = body.investor || agent.getAgentInfo().agent_id;
-        const result = projectManager.fund(body.project_id, investor, body.amount);
-        json(res, result.success ? 200 : 422, result);
-        return;
-      }
-
-      if (req.method === "POST" && path === "/project/task/assign") {
-        const body = JSON.parse(await readBody(req));
-        const result = projectManager.assignTask(body.project_id, body.task_id, body.agent_id);
-        json(res, result.success ? 200 : 422, result);
-        return;
-      }
-
-      if (req.method === "POST" && path === "/project/task/complete") {
-        const body = JSON.parse(await readBody(req));
-        const result = projectManager.completeTask(body.project_id, body.task_id, body.proof_id);
-        json(res, result.success ? 200 : 422, result);
-        return;
-      }
-
-      if (req.method === "POST" && path === "/project/task/fail") {
-        const body = JSON.parse(await readBody(req));
-        const result = projectManager.failTask(body.project_id, body.task_id);
-        json(res, result.success ? 200 : 422, result);
-        return;
-      }
-
-      if (req.method === "GET" && path === "/project/distribute") {
-        const projectId = url.searchParams.get("project_id");
-        if (!projectId) { json(res, 400, { error: "project_id required" }); return; }
-        const result = projectManager.calculateDistribution(projectId);
-        json(res, result.success ? 200 : 422, result);
-        return;
-      }
-
-      if (req.method === "GET" && path === "/project/list") {
-        const status = url.searchParams.get("status") as Project["status"] | null;
-        json(res, 200, { projects: projectManager.listProjects(status ?? undefined) });
-        return;
-      }
-
-      if (req.method === "GET" && path.startsWith("/project/") && !path.includes("/task/")) {
-        const projectId = path.split("/")[2];
-        const project = projectManager.getProject(projectId);
-        json(res, project ? 200 : 404, project || { error: "Not found" });
-        return;
-      }
-
-      if (req.method === "POST" && path === "/project/broadcast") {
-        const body = JSON.parse(await readBody(req));
-        const payload = projectManager.toBroadcast(body.project_id);
-        if (!payload) { json(res, 404, { error: "Project not found" }); return; }
-        const swarm = agent.getSwarm();
-        let sent = 0;
-        const peers = typeof swarm.getConnectedPeers === "function" ? swarm.getConnectedPeers() : [];
-        for (const peer of peers) {
-          if (peer.connected && peer.agentId) {
-            if (swarm.sendTaskMessage(peer.agentId, "project_broadcast", payload)) sent++;
-          }
-        }
-        json(res, 200, { broadcast: payload, peers_notified: sent });
-        return;
-      }
-
-      if (req.method === "POST" && path === "/ai/generate-icon") {
-        try {
-          const body = JSON.parse(await readBody(req));
-          const result = await generateIcon(
-            body.name || "Token",
-            body.symbol || "TOK",
-            body.description || ""
-          );
-          if (result.success && result.buffer) {
-            json(res, 200, {
-              success: true,
-              image_base64: result.buffer.toString("base64"),
-              size: result.buffer.length,
-            });
-          } else {
-            json(res, 422, { success: false, error: result.error });
-          }
-        } catch (err) {
-          json(res, 500, { error: (err as Error).message });
-        }
-        return;
-      }
+      if (await handleProject(ctx, rc)) return;
 
       // ============================================================
       // Webhook routes
       // ============================================================
 
-      if (req.method === "GET" && path === "/webhooks") {
-        json(res, 200, { webhooks: webhooks });
-        return;
-      }
-
-      if (req.method === "POST" && path === "/webhooks") {
-        const body = JSON.parse(await readBody(req));
-        if (!body.url || !body.events) { json(res, 400, { error: "url and events required" }); return; }
-        const hook = {
-          id: `wh_${Date.now().toString(36)}`,
-          url: body.url,
-          events: body.events as string[],
-          created_at: new Date().toISOString(),
-        };
-        webhooks.push(hook);
-        json(res, 200, hook);
-        return;
-      }
-
-      if (req.method === "DELETE" && path.startsWith("/webhooks/")) {
-        const whId = path.split("/")[2];
-        const idx = webhooks.findIndex(w => w.id === whId);
-        if (idx === -1) { json(res, 404, { error: "Webhook not found" }); return; }
-        webhooks.splice(idx, 1);
-        json(res, 200, { deleted: whId });
-        return;
-      }
+      if (await handleWebhooks(ctx, rc)) return;
 
       // ============================================================
       // Pump.fun routes
@@ -1047,216 +558,7 @@ function createDaemonApi(ctx: DaemonContext) {
       // Auction routes
       // ============================================================
 
-      if (req.method === "POST" && path === "/auction/create") {
-        const body = JSON.parse(await readBody(req));
-        const missing: string[] = [];
-        for (const field of ["type", "description", "input", "budget", "bid_deadline", "selection"]) {
-          if (body[field] === undefined) missing.push(field);
-        }
-        if (missing.length > 0) {
-          json(res, 400, { error: `Missing required fields: ${missing.join(", ")}` });
-          return;
-        }
-
-        const record = auction.createAuction({
-          type: body.type,
-          description: body.description,
-          input: body.input,
-          budget: body.budget,
-          bid_deadline: body.bid_deadline,
-          selection: body.selection,
-          min_reputation: body.min_reputation,
-          required_capabilities: body.required_capabilities,
-          required_skills: body.required_skills,
-          timeout_ms: body.timeout_ms,
-          priority: body.priority,
-        });
-        auctionOrigins.set(record.task_id, agent.getAgentInfo().agent_id);
-
-        // Push notification: if required_skills set, notify matching peers first
-        let notifiedPeers = 0;
-        if (body.required_skills && body.required_skills.length > 0) {
-          const matches = profileManager.findMatchingPeers(body.required_skills, 0.3);
-          const swarm = agent.getSwarm();
-          for (const match of matches) {
-            if (swarm.sendTaskMessage(match.agent_id, "task_notify", {
-              task_id: record.task_id,
-              type: body.type,
-              description: body.description,
-              required_skills: body.required_skills,
-              budget: body.budget,
-              match_score: match.score,
-            })) {
-              notifiedPeers++;
-            }
-          }
-          if (notifiedPeers > 0) {
-            console.error(`[Match] Notified ${notifiedPeers} matching peers for ${record.task_id}`);
-          }
-        }
-
-        const broadcastCount = broadcastAuctionTask(agent, record.broadcast);
-        json(res, 200, {
-          auction: serializeAuction(record, auctionOrigins),
-          broadcast_sent: broadcastCount,
-        });
-        return;
-      }
-
-      if (req.method === "GET" && path === "/auction/list") {
-        const status = url.searchParams.get("status") as AuctionStatus | null;
-        const auctions = auction.listAuctions(status ?? undefined).map((record) => (
-          serializeAuction(record, auctionOrigins)
-        ));
-        json(res, 200, { auctions });
-        return;
-      }
-
-      if (req.method === "GET" && path.match(/^\/auction\/[^/]+$/)) {
-        const taskId = decodeURIComponent(path.split("/")[2]);
-        const record = auction.getAuction(taskId);
-        json(res, record ? 200 : 404, record ? serializeAuction(record, auctionOrigins) : { error: "Auction not found" });
-        return;
-      }
-
-      if (req.method === "POST" && path.match(/^\/auction\/[^/]+\/bid$/)) {
-        const taskId = decodeURIComponent(path.split("/")[2]);
-        const body = JSON.parse(await readBody(req));
-        const record = auction.getAuction(taskId);
-        if (!record) {
-          json(res, 404, { error: "Auction not found" });
-          return;
-        }
-
-        const bidder = agent.getAgentInfo().agent_id;
-        const originAgentId = auctionOrigins.get(taskId) ?? bidder;
-        if (originAgentId === bidder) {
-          const result = auction.submitBid(taskId, {
-            task_id: taskId,
-            bidder,
-            price: body.price,
-            estimated_duration_ms: body.estimated_duration_ms,
-            reputation_score: reputation.getScore(bidder),
-            message: body.message,
-            capabilities: body.capabilities ?? [],
-          });
-          json(res, result.success ? 200 : 422, result);
-          return;
-        }
-
-        const swarm = agent.getSwarm();
-        const sent = swarm.sendTaskMessage(originAgentId, "task_bid", {
-          task_id: taskId,
-          price: body.price,
-          estimated_duration_ms: body.estimated_duration_ms,
-          reputation_score: reputation.getScore(bidder),
-          message: body.message,
-          capabilities: body.capabilities ?? [],
-        });
-
-        json(res, sent ? 200 : 422, sent
-          ? { success: true, task_id: taskId, bidder, issuer_agent_id: originAgentId }
-          : { success: false, error: "Peer not connected", issuer_agent_id: originAgentId });
-        return;
-      }
-
-      if (req.method === "POST" && path.match(/^\/auction\/[^/]+\/award$/)) {
-        const taskId = decodeURIComponent(path.split("/")[2]);
-        if ((auctionOrigins.get(taskId) ?? agent.getAgentInfo().agent_id) !== agent.getAgentInfo().agent_id) {
-          json(res, 403, { error: "Only the auction issuer can award bids" });
-          return;
-        }
-
-        const body = JSON.parse(await readBody(req));
-        const record = auction.awardTask(taskId, body.bid_id);
-        if (!record) {
-          json(res, 422, { error: "Unable to award bid" });
-          return;
-        }
-
-        const award = buildAuctionAward(record);
-        let notified = false;
-        if (award && award.awarded_to !== agent.getAgentInfo().agent_id) {
-          notified = agent.getSwarm().sendTaskMessage(award.awarded_to, "task_award", award);
-        }
-
-        json(res, 200, { auction: serializeAuction(record, auctionOrigins), notified });
-        return;
-      }
-
-      if (req.method === "POST" && path.match(/^\/auction\/[^/]+\/close$/)) {
-        const taskId = decodeURIComponent(path.split("/")[2]);
-        if ((auctionOrigins.get(taskId) ?? agent.getAgentInfo().agent_id) !== agent.getAgentInfo().agent_id) {
-          json(res, 403, { error: "Only the auction issuer can close bidding" });
-          return;
-        }
-
-        const record = auction.closeBidding(taskId);
-        if (!record) {
-          json(res, 422, { error: "Unable to close auction" });
-          return;
-        }
-
-        const award = buildAuctionAward(record);
-        let notified = false;
-        if (award && award.awarded_to !== agent.getAgentInfo().agent_id) {
-          notified = agent.getSwarm().sendTaskMessage(award.awarded_to, "task_award", award);
-        }
-
-        json(res, 200, { auction: serializeAuction(record, auctionOrigins), notified });
-        return;
-      }
-
-      if (req.method === "POST" && path.match(/^\/auction\/[^/]+\/cancel$/)) {
-        const taskId = decodeURIComponent(path.split("/")[2]);
-        if ((auctionOrigins.get(taskId) ?? agent.getAgentInfo().agent_id) !== agent.getAgentInfo().agent_id) {
-          json(res, 403, { error: "Only the auction issuer can cancel the auction" });
-          return;
-        }
-
-        const record = auction.cancelAuction(taskId);
-        json(res, record ? 200 : 422, record ? serializeAuction(record, auctionOrigins) : { error: "Unable to cancel auction" });
-        return;
-      }
-
-      if (req.method === "POST" && path.match(/^\/auction\/[^/]+\/prepare$/)) {
-        const taskId = decodeURIComponent(path.split("/")[2]);
-        if ((auctionOrigins.get(taskId) ?? agent.getAgentInfo().agent_id) !== agent.getAgentInfo().agent_id) {
-          json(res, 403, { error: "Only the auction issuer can prepare execution" });
-          return;
-        }
-
-        const privateKey = await getSigningKey(agent);
-        const keyId = agent.getKeyId() || "unknown";
-        const result = auction.prepareExecution(taskId, privateKey, keyId);
-        json(res, result.success ? 200 : 422, result);
-        return;
-      }
-
-      if (req.method === "POST" && path.match(/^\/auction\/[^/]+\/finalize$/)) {
-        const taskId = decodeURIComponent(path.split("/")[2]);
-        if ((auctionOrigins.get(taskId) ?? agent.getAgentInfo().agent_id) !== agent.getAgentInfo().agent_id) {
-          json(res, 403, { error: "Only the auction issuer can finalize execution" });
-          return;
-        }
-
-        const body = JSON.parse(await readBody(req));
-        const { fromBase64 } = await import("../lib/crypto/keys");
-        const privateKey = await getSigningKey(agent);
-        const workerPublicKey = fromBase64(body.worker_public_key);
-        const keyId = agent.getKeyId() || "unknown";
-        const result = auction.finalizeExecution(
-          taskId,
-          body.proof,
-          body.expected_input,
-          body.received_output,
-          workerPublicKey,
-          privateKey,
-          keyId
-        );
-        json(res, result.success ? 200 : 422, result);
-        return;
-      }
+      if (await handleAuction(ctx, rc)) return;
 
       json(res, 404, { error: "Not found" });
     } catch (err) {
