@@ -165,11 +165,12 @@ tests/                   # テストスイート (node:test)
   test_verification.ts   # 実行証明 (18テスト)
   test_economic.ts       # トークン・エスクロー (31テスト)
   test_marketplace.ts    # マーケットプレイス統合 (27テスト)
-  test_e2e_security.ts   # E2E 統合 (34テスト、実デーモン起動)
-  test_e2e_economic.ts   # 永続化・P2P送金 E2E (7テスト)
-  test_e2e_evm.ts        # EVM オンチェーン E2E (11テスト、Ganache ローカル)
-  test_e2e_solana.ts     # Solana オンチェーン E2E (9テスト、devnet)
-  test_solana_client.ts  # SolanaClient ユニットテスト (13テスト)
+  test_e2e_security.ts   # E2E 統合 (34テスト、実デーモン起動・オフライン)
+  test_e2e_economic.ts   # 永続化・P2P送金 E2E (7テスト、オフライン)
+  test_e2e_project.ts    # プロジェクト・Webhook E2E (9テスト、オフライン)
+  test_e2e_evm.ts        # EVM オンチェーン E2E (11テスト、Ganache ローカル・オフライン)
+  test_e2e_solana.ts     # Solana オンチェーン E2E (9テスト、devnet 必須=test:integration)
+  test_solana_client.ts  # SolanaClient ユニットテスト (13テスト、オフライン)
 site/                    # ディスカバリサイト (Cloudflare Pages)
   src/                   # 静的フロントエンド
   functions/             # Cloudflare Workers API
@@ -455,10 +456,14 @@ Worker 実行 + 実行証明作成
 
 ## テスト実行
 
-```bash
-# 全テスト
-npx tsx --test tests/test_matching.ts tests/test_security_policy.ts tests/test_reputation.ts tests/test_verification.ts tests/test_economic.ts tests/test_marketplace.ts
+npm scripts でテスト層を分離している（オフライン層は CI 安全、devnet 層は随時実行）。
 
-# E2E（実デーモン2台起動、約3秒）
-npx tsx --test tests/test_e2e_security.ts
+```bash
+npm test              # 高速ユニット（マッチング/セキュリティ/経済/暗号/SolanaClient 等・オフライン）
+npm run test:e2e      # オフライン E2E（実デーモン起動: security/economic/project/evm(Ganache)）
+npm run test:all      # ユニット + オフライン E2E（= test && test:e2e。これが CI で回す全量）
+npm run test:integration  # devnet 必須: test_e2e_solana（Solana devnet 接続 + SOL 残高が要る・on-demand）
 ```
+
+`test:integration` は外部の Solana devnet に依存するため `test:all` には含めない。
+ローカルで実行する場合は devnet 接続とガス用 SOL を用意すること（レート制限時は airdrop が skip される）。
