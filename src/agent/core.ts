@@ -12,7 +12,7 @@
 import { createHash, randomBytes } from "crypto";
 import { EventEmitter } from "events";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
-import { dirname, join } from "path";
+import { basename, dirname, join } from "path";
 
 import {
   P2PSwarm,
@@ -42,6 +42,17 @@ import type {
   Envelope,
   MessageType,
 } from "../types/protocol";
+
+/**
+ * Strip directory components from a peer-supplied filename so a crafted name
+ * (e.g. "../../etc/cron.d/x") cannot escape the target directory (path traversal).
+ * Returns null when the name resolves to nothing usable.
+ */
+export function sanitizeReceivedFilename(name: string): string | null {
+  const safe = basename(name);
+  if (!safe || safe === "." || safe === "..") return null;
+  return safe;
+}
 
 // --- Persisted agent state ---
 
@@ -107,10 +118,16 @@ export class P2PAgent extends EventEmitter {
     this.swarm.on("file", (event: P2PFileEvent) => {
       const outDir = join(this.config.dataDir, "received");
       mkdirSync(outDir, { recursive: true });
-      const filePath = join(outDir, event.filename);
+      // Peer-supplied filename is untrusted; sanitize to prevent path traversal.
+      const safeName = sanitizeReceivedFilename(event.filename);
+      if (safeName === null) {
+        console.error(`[Agent] Rejected file with unsafe name "${event.filename}" from ${event.from}`);
+        return;
+      }
+      const filePath = join(outDir, safeName);
       writeFileSync(filePath, Buffer.from(event.data, "base64"));
-      console.error(`[Agent] Received file: ${event.filename} (${event.size} bytes) from ${event.from} → ${filePath}`);
-      this.emit("file:received", { from: event.from, filename: event.filename, path: filePath, size: event.size });
+      console.error(`[Agent] Received file: ${safeName} (${event.size} bytes) from ${event.from} → ${filePath}`);
+      this.emit("file:received", { from: event.from, filename: safeName, path: filePath, size: event.size });
     });
 
     this.swarm.on("peer:identified", (peer: PeerConnection) => {
