@@ -19,7 +19,7 @@ import Hyperswarm, { type HyperswarmPeerInfo } from "hyperswarm";
 import { createHash } from "crypto";
 import { EventEmitter } from "events";
 import type { SignedMessage, AgentId } from "../../types/protocol";
-import { sign, toBase64 } from "../crypto/keys";
+import { sign, verify, toBase64, fromBase64 } from "../crypto/keys";
 
 export interface PeerConnection {
   remotePublicKey: string; // hex (Hyperswarm Noise key)
@@ -27,14 +27,19 @@ export interface PeerConnection {
   stream: NodeJS.ReadWriteStream;
   connected: boolean;
   verified: boolean; // handshake signature verified
+  ed25519PublicKey?: string; // base64, set once a signed handshake verifies the peer
 }
 
 export interface SwarmConfig {
   agentId: AgentId;
   namespace: string;
   seed?: Buffer;
-  signingKey?: Uint8Array; // Ed25519 private key for handshake
-  verifyPeer?: (agentId: AgentId, signature: string, challenge: string) => boolean;
+  signingKey?: Uint8Array; // Ed25519 private key used to sign the handshake
+  publicKey?: Uint8Array; // Ed25519 public key advertised in the handshake
+  /** Returns the Ed25519 public key (base64) previously pinned for an agent, if any (TOFU). */
+  resolvePinnedKey?: (agentId: AgentId) => string | undefined;
+  /** When true, peers sending an unsigned handshake are not marked verified (no legacy fallback). */
+  requireSignedHandshake?: boolean;
 }
 
 interface QueuedMessage {
@@ -92,6 +97,86 @@ interface HandshakeMessage {
   agent_id: AgentId;
   challenge: string;
   signature?: string;
+  public_key?: string; // base64 Ed25519 public key of the sender
+}
+
+/** Max clock skew (ms) tolerated between the handshake challenge timestamp and now. */
+const HANDSHAKE_MAX_SKEW_MS = 5 * 60_000;
+
+/**
+ * Build the byte string signed during the handshake. It binds the signature to
+ * the recipient's Noise transport key (channel binding) so a signature captured
+ * on one connection cannot be replayed onto a different peer-to-peer session.
+ */
+export function buildHandshakeSigInput(
+  agentId: AgentId,
+  recipientNoiseKeyHex: string,
+  challenge: string,
+): Uint8Array {
+  return new TextEncoder().encode(`handshake:${agentId}:${recipientNoiseKeyHex}:${challenge}`);
+}
+
+export interface HandshakeInput {
+  agentId?: AgentId;
+  challenge?: string;
+  signature?: string; // base64
+  publicKey?: string; // base64
+}
+
+export interface HandshakeContext {
+  recipientNoiseKeyHex: string; // our own Noise key — channel binding
+  now: number;
+  pinnedKey?: string; // base64 Ed25519 key previously pinned for this agentId (TOFU)
+  requireSignedHandshake?: boolean;
+}
+
+export interface HandshakeResult {
+  verified: boolean;
+  pinnedKey?: string; // base64 key to pin when verified via a valid signature
+  reason: string;
+}
+
+/**
+ * Decide whether a handshake authenticates the peer. Pure so it can be unit-tested
+ * without a live swarm.
+ *   - signed + valid signature + fresh challenge + key matches any existing pin
+ *     → verified (and the key is returned for TOFU pinning)
+ *   - signed but invalid / stale / key-mismatch → rejected (hard fail, no fallback)
+ *   - unsigned → legacy-accepted unless requireSignedHandshake is set
+ * A mismatch against a previously pinned key is always rejected: a different key
+ * for a known agent is the signature of an impersonation attempt.
+ */
+export function evaluateHandshake(input: HandshakeInput, ctx: HandshakeContext): HandshakeResult {
+  const { agentId, challenge, signature, publicKey } = input;
+  if (signature && publicKey && challenge && agentId) {
+    const ts = Number(challenge);
+    const fresh = Number.isFinite(ts) && Math.abs(ctx.now - ts) <= HANDSHAKE_MAX_SKEW_MS;
+    const pinOk = !ctx.pinnedKey || ctx.pinnedKey === publicKey;
+    let sigOk = false;
+    try {
+      sigOk = verify(
+        fromBase64(signature),
+        buildHandshakeSigInput(agentId, ctx.recipientNoiseKeyHex, challenge),
+        fromBase64(publicKey),
+      );
+    } catch {
+      sigOk = false;
+    }
+    if (sigOk && fresh && pinOk) {
+      return { verified: true, pinnedKey: publicKey, reason: "signed" };
+    }
+    return { verified: false, reason: `rejected sig=${sigOk} fresh=${fresh} pin=${pinOk}` };
+  }
+  if (ctx.pinnedKey) {
+    // This agent has presented a signed handshake before (its key is pinned).
+    // Refuse a downgrade to an unsigned handshake, which would otherwise bypass
+    // the pin and let anyone impersonate the agent by simply omitting a signature.
+    return { verified: false, reason: "downgrade-pinned" };
+  }
+  if (ctx.requireSignedHandshake) {
+    return { verified: false, reason: "unsigned-rejected" };
+  }
+  return { verified: true, reason: "unsigned-legacy" };
 }
 
 interface PeerWireMessage extends Record<string, unknown> {
@@ -112,6 +197,7 @@ export class P2PSwarm extends EventEmitter {
   private peers: Map<string, PeerConnection> = new Map();
   private outboundQueue: QueuedMessage[] = [];
   private retryTimer?: ReturnType<typeof setInterval>;
+  private myNoiseKeyHex = ""; // our own Noise transport key (hex), for handshake channel binding
   public agentId: AgentId;
 
   constructor(private config: SwarmConfig) {
@@ -127,6 +213,7 @@ export class P2PSwarm extends EventEmitter {
     if (this.config.seed) opts.seed = this.config.seed;
 
     this.swarm = new Hyperswarm(opts);
+    this.myNoiseKeyHex = Buffer.from(this.swarm.keyPair.publicKey).toString("hex");
 
     this.swarm.on("connection", (socket: NodeJS.ReadWriteStream, peerInfo: HyperswarmPeerInfo) => {
       const remoteKey = peerInfo.publicKey.toString("hex");
@@ -140,20 +227,18 @@ export class P2PSwarm extends EventEmitter {
       };
       this.peers.set(remoteKey, peer);
 
-      // Send handshake with signed challenge
+      // Send handshake with a signed, channel-bound challenge. `remoteKey` is the
+      // recipient's Noise key, binding the signature to this specific connection.
       const challenge = Date.now().toString();
       const handshake: HandshakeMessage = {
         type: "handshake",
         agent_id: this.agentId,
         challenge,
       };
-
-      // Sign the handshake if we have a signing key
-      if (this.config.signingKey) {
-        const sigInput = new TextEncoder().encode(
-          `handshake:${this.agentId}:${challenge}`
-        );
+      if (this.config.signingKey && this.config.publicKey) {
+        const sigInput = buildHandshakeSigInput(this.agentId, remoteKey, challenge);
         handshake.signature = toBase64(sign(sigInput, this.config.signingKey));
+        handshake.public_key = toBase64(this.config.publicKey);
       }
 
       this.sendRaw(socket, handshake);
@@ -230,7 +315,7 @@ export class P2PSwarm extends EventEmitter {
   /** Send to a specific agent. Returns false if not connected (queued). */
   sendMessage(targetAgentId: AgentId, message: SignedMessage): boolean {
     for (const peer of this.peers.values()) {
-      if (peer.agentId === targetAgentId && peer.connected) {
+      if (peer.agentId === targetAgentId && peer.connected && peer.verified) {
         return this.sendRaw(peer.stream, {
           type: "protocol_message",
           payload: message,
@@ -254,7 +339,7 @@ export class P2PSwarm extends EventEmitter {
   /** Send a file to a specific agent */
   sendFile(targetAgentId: AgentId, filename: string, data: string, size: number, mime: string): boolean {
     for (const peer of this.peers.values()) {
-      if (peer.agentId === targetAgentId && peer.connected) {
+      if (peer.agentId === targetAgentId && peer.connected && peer.verified) {
         return this.sendRaw(peer.stream, {
           type: "file_transfer",
           filename,
@@ -271,7 +356,7 @@ export class P2PSwarm extends EventEmitter {
   /** Send a task message to a specific agent */
   sendTaskMessage(targetAgentId: AgentId, type: string, payload: unknown): boolean {
     for (const peer of this.peers.values()) {
-      if (peer.agentId === targetAgentId && peer.connected) {
+      if (peer.agentId === targetAgentId && peer.connected && peer.verified) {
         return this.sendRaw(peer.stream, { type, payload });
       }
     }
@@ -343,7 +428,7 @@ export class P2PSwarm extends EventEmitter {
     for (const item of this.outboundQueue) {
       let sent = false;
       for (const peer of this.peers.values()) {
-        if (peer.agentId === item.targetAgentId && peer.connected) {
+        if (peer.agentId === item.targetAgentId && peer.connected && peer.verified) {
           this.sendRaw(peer.stream, {
             type: "protocol_message",
             payload: item.message,
@@ -379,6 +464,31 @@ export class P2PSwarm extends EventEmitter {
     }
   }
 
+  /** Apply handshake verification to a peer, pinning its key on success. */
+  private applyHandshake(peer: PeerConnection, msg: PeerWireMessage, claimedId: AgentId | undefined): boolean {
+    const result = evaluateHandshake(
+      {
+        agentId: claimedId,
+        challenge: typeof msg.challenge === "string" ? msg.challenge : undefined,
+        signature: typeof msg.signature === "string" ? msg.signature : undefined,
+        publicKey: typeof msg.public_key === "string" ? msg.public_key : undefined,
+      },
+      {
+        recipientNoiseKeyHex: this.myNoiseKeyHex,
+        now: Date.now(),
+        pinnedKey: claimedId ? this.config.resolvePinnedKey?.(claimedId) : undefined,
+        requireSignedHandshake: this.config.requireSignedHandshake,
+      },
+    );
+    if (result.verified && result.pinnedKey) {
+      peer.ed25519PublicKey = result.pinnedKey;
+    }
+    if (!result.verified) {
+      console.error(`[P2P] Handshake ${result.reason} from ${claimedId ?? "?"}`);
+    }
+    return result.verified;
+  }
+
   private handlePeerMessage(remoteKey: string, msg: unknown): void {
     const peer = this.peers.get(remoteKey);
     if (!peer) return;
@@ -388,18 +498,24 @@ export class P2PSwarm extends EventEmitter {
     }
 
     switch (msg.type) {
-      case "handshake":
-        if (typeof msg.agent_id === "string") {
-          peer.agentId = msg.agent_id as AgentId;
+      case "handshake": {
+        const claimedId = typeof msg.agent_id === "string" ? (msg.agent_id as AgentId) : undefined;
+        // Only bind the claimed agent id to the peer once it is verified, so an
+        // unverified peer can never be selected as a directed-send target.
+        peer.verified = this.applyHandshake(peer, msg, claimedId);
+        if (peer.verified) {
+          if (claimedId) peer.agentId = claimedId;
+          console.error(`[P2P] Peer identified: ${claimedId}`);
+          this.emit("peer:identified", peer);
+          // Flush any queued messages for this peer
+          setTimeout(() => this.flushQueue(), 100);
+        } else if (this.config.requireSignedHandshake) {
+          // Hardened mode: drop the connection to a peer we could not verify.
+          peer.connected = false;
+          peer.stream.end();
         }
-        // In production, verify msg.signature against known public keys
-        peer.verified = true;
-        console.error(`[P2P] Peer identified: ${msg.agent_id}`);
-        this.emit("peer:identified", peer);
-
-        // Flush any queued messages for this peer
-        setTimeout(() => this.flushQueue(), 100);
         break;
+      }
 
       case "protocol_message":
         if (!peer.verified) {

@@ -71,6 +71,7 @@ declare module "hyperswarm" {
 
   export default class Hyperswarm extends import("events").EventEmitter {
     constructor(options?: HyperswarmOptions);
+    keyPair: { publicKey: Uint8Array; secretKey: Uint8Array };
     connecting: number;
     connections: Set<NodeJS.ReadWriteStream>;
     peers: Map<string, HyperswarmPeerInfo>;
