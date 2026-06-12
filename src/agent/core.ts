@@ -211,6 +211,14 @@ export class P2PAgent extends EventEmitter {
     return this.state.privateKey;
   }
 
+  getSwarm(): P2PSwarm {
+    return this.swarm;
+  }
+
+  getKeyId(): string {
+    return this.state?.keyId ?? "";
+  }
+
   getDataDir(): string {
     return this.config.dataDir;
   }

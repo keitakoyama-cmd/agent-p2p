@@ -18,8 +18,10 @@ import { spawn, ChildProcess } from "child_process";
 import { readFileSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 
-const PORT_NOBILL = 7720;
-const PORT_BILL = 7721;
+// 7750/7751: kept distinct from every other e2e suite (7710-7742) so this
+// safety net never EADDRINUSE-flakes when test order changes or runs parallel.
+const PORT_NOBILL = 7750;
+const PORT_BILL = 7751;
 const DATA_NOBILL = "/tmp/agent-p2p-e2e-routes-nobill";
 const DATA_BILL = "/tmp/agent-p2p-e2e-routes-bill";
 const AGENT_NOBILL = "agent:e2e:routes-nobill";
@@ -98,10 +100,15 @@ describe("E2E Route Invariants (PR3a pin tests)", () => {
     tokenBill = readFileSync(join(DATA_BILL, "api-token"), "utf8").trim();
   });
 
-  after(() => {
+  after(async () => {
     procNoBill?.kill("SIGTERM");
     procBill?.kill("SIGTERM");
-    for (const d of [DATA_NOBILL, DATA_BILL]) if (existsSync(d)) rmSync(d, { recursive: true });
+    // Let daemons flush and exit before removing their data dirs — SIGTERM is
+    // async, so an immediate rmSync races writes and throws ENOTEMPTY.
+    await sleep(500);
+    for (const d of [DATA_NOBILL, DATA_BILL]) {
+      try { if (existsSync(d)) rmSync(d, { recursive: true, force: true }); } catch {}
+    }
   });
 
   // Bound to the no-billing daemon (the common case).

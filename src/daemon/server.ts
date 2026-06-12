@@ -25,15 +25,14 @@
  */
 
 import { createServer, IncomingMessage, ServerResponse } from "http";
-import { randomBytes } from "crypto";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { readdirSync, statSync } from "fs";
 import { join } from "path";
 import { P2PAgent } from "../agent/core";
 import { BillingPlugin } from "../agent/billing";
 import { DiscoveryClient, type ConnectionRequest } from "../lib/discovery/client";
-import { InviteManager } from "../lib/invite/manager";
+import { InviteManager, type InviteResult } from "../lib/invite/manager";
 import { AuctionManager } from "../lib/marketplace/auction";
-import { TaskManager } from "../lib/task/manager";
+import { TaskManager, type TrackedTask } from "../lib/task/manager";
 import { TaskPlanner, type Plan } from "../lib/task/planner";
 import { ReputationManager } from "../lib/reputation/manager";
 import { ExecutionVerifier } from "../lib/verification/prover";
@@ -45,6 +44,11 @@ import { SolanaClient } from "../lib/chain/solana";
 import { PumpFunClient } from "../lib/chain/pumpfun";
 import { ProjectManager } from "../lib/project/manager";
 import { generateIcon } from "../lib/ai/image";
+import { checkBearerAuth, json, loadOrCreateApiToken, readBody } from "./http-util";
+import { loadEconomicState, saveEconomicState } from "./economic-state";
+import { getSigningKey } from "./signing";
+import type { P2PSwarm, PeerConnection } from "../lib/p2p/swarm";
+import type { Project } from "../lib/project/manager";
 import type {
   AgentId,
   AuctionRecord,
@@ -54,9 +58,11 @@ import type {
   Heartbeat,
   InvoiceIssuePayload,
   OrgId,
+  SignedMessage,
   TaskAward,
   TaskBid,
   TaskBroadcast,
+  TaskStatus,
 } from "../types/protocol";
 
 // --- Parse CLI args ---
@@ -88,90 +94,13 @@ function parseArgs() {
   };
 }
 
-// --- HTTP API for MCP proxy ---
-
-async function readBody(req: IncomingMessage): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
-  return Buffer.concat(chunks).toString("utf8");
-}
-
-function json(res: ServerResponse, status: number, data: unknown) {
-  res.writeHead(status, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(data));
-}
-
-// --- API Token management ---
-
-function loadOrCreateApiToken(dataDir: string): string {
-  mkdirSync(dataDir, { recursive: true });
-  const tokenFile = join(dataDir, "api-token");
-
-  if (existsSync(tokenFile)) {
-    const token = readFileSync(tokenFile, "utf8").trim();
-    if (token.length > 0) return token;
-  }
-
-  const token = randomBytes(32).toString("hex");
-  writeFileSync(tokenFile, token, { mode: 0o600 });
-  return token;
-}
-
-function checkBearerAuth(req: IncomingMessage, expectedToken: string): boolean {
-  const authHeader = req.headers["authorization"];
-  if (!authHeader) return false;
-  const parts = authHeader.split(" ");
-  if (parts.length !== 2 || parts[0] !== "Bearer") return false;
-  return parts[1] === expectedToken;
-}
-
-type SwarmTaskPeer = {
-  agentId?: AgentId;
-  connected: boolean;
-  verified?: boolean;
-};
-
-type SwarmTaskApi = {
-  broadcastTask?: (broadcast: TaskBroadcast) => number;
-  getConnectedPeers?: () => SwarmTaskPeer[];
-  sendTaskMessage: (targetAgentId: AgentId, type: string, payload: unknown) => boolean;
-};
-
-// --- Economic state persistence ---
-
-const ECONOMIC_STATE_FILE = "economic-state.json";
-
-function loadEconomicState(dataDir: string, economic: EconomicManager): void {
-  const file = join(dataDir, ECONOMIC_STATE_FILE);
-  if (!existsSync(file)) return;
-  try {
-    const data = JSON.parse(readFileSync(file, "utf8"));
-    economic.load(data);
-    const tokenCount = Object.keys(data.tokens || {}).length;
-    const walletCount = Object.keys(data.wallets || {}).length;
-    console.error(`[Economic] Loaded state: ${tokenCount} tokens, ${walletCount} wallets, ${(data.ledger || []).length} ledger entries`);
-  } catch (err) {
-    console.error(`[Economic] WARNING: Failed to load state from ${file}: ${(err as Error).message}`);
-  }
-}
-
-function saveEconomicState(dataDir: string, economic: EconomicManager): void {
-  const file = join(dataDir, ECONOMIC_STATE_FILE);
-  try {
-    mkdirSync(dataDir, { recursive: true });
-    writeFileSync(file, JSON.stringify(economic.serialize(), null, 2));
-  } catch (err) {
-    console.error(`[Economic] WARNING: Failed to save state to ${file}: ${(err as Error).message}`);
-  }
-}
-
 function broadcastAuctionTask(agent: P2PAgent, broadcast: TaskBroadcast): number {
-  const swarm = (agent as any).swarm as SwarmTaskApi;
+  const swarm: P2PSwarm = agent.getSwarm();
   if (typeof swarm.broadcastTask === "function") {
     return swarm.broadcastTask(broadcast);
   }
 
-  const peers = typeof swarm.getConnectedPeers === "function" ? swarm.getConnectedPeers() : [];
+  const peers: PeerConnection[] = typeof swarm.getConnectedPeers === "function" ? swarm.getConnectedPeers() : [];
   let sent = 0;
   for (const peer of peers) {
     if (!peer.connected || peer.verified === false || !peer.agentId) continue;
@@ -351,14 +280,12 @@ function createDaemonApi(
       }
 
       if (req.method === "GET" && path === "/file/received") {
-        const { readdirSync, statSync } = await import("fs");
-        const receivedDir = require("path").join(agent.getAgentInfo().agent_id.replace(/:/g, "_"), "received");
-        const dataDir = (agent as any).config?.dataDir || "";
-        const dir = require("path").join(dataDir, "received");
+        const dataDir = agent.getDataDir() || "";
+        const dir = join(dataDir, "received");
         try {
           const files = readdirSync(dir).map(f => ({
             name: f,
-            size: statSync(require("path").join(dir, f)).size,
+            size: statSync(join(dir, f)).size,
           }));
           json(res, 200, { files, directory: dir });
         } catch {
@@ -408,7 +335,7 @@ function createDaemonApi(
           priority: body.priority,
         });
 
-        const sent = (agent as any).swarm.sendTaskMessage(targetId, "task_request", task.request);
+        const sent = agent.getSwarm().sendTaskMessage(targetId, "task_request", task.request);
         if (!sent) { json(res, 422, { error: "Peer not connected", task }); return; }
 
         json(res, 200, { task, needs_approval: perm.needsApproval });
@@ -416,8 +343,8 @@ function createDaemonApi(
       }
 
       if (req.method === "GET" && path === "/task/list") {
-        const status = url.searchParams.get("status") || undefined;
-        json(res, 200, { tasks: taskManager.listTasks(status as any) });
+        const status = url.searchParams.get("status") as TaskStatus | null;
+        json(res, 200, { tasks: taskManager.listTasks(status ?? undefined) });
         return;
       }
 
@@ -436,20 +363,20 @@ function createDaemonApi(
 
         if (action === "accept") {
           taskManager.updateTaskStatus(task_id, "accepted");
-          (agent as any).swarm.sendTaskMessage(task.from, "task_accept", { task_id });
+          agent.getSwarm().sendTaskMessage(task.from, "task_accept", { task_id });
         } else if (action === "reject") {
           taskManager.updateTaskStatus(task_id, "cancelled");
-          (agent as any).swarm.sendTaskMessage(task.from, "task_reject", { task_id, reason: body.reason || "" });
+          agent.getSwarm().sendTaskMessage(task.from, "task_reject", { task_id, reason: body.reason || "" });
         } else if (action === "complete") {
           const result = { task_id, status: "completed" as const, output: body.output || {}, duration_ms: Date.now() - task.created_at };
           taskManager.updateTaskStatus(task_id, "completed", result);
-          (agent as any).swarm.sendTaskMessage(task.from, "task_result", result);
+          agent.getSwarm().sendTaskMessage(task.from, "task_result", result);
         } else if (action === "fail") {
           taskManager.updateTaskStatus(task_id, "failed");
-          (agent as any).swarm.sendTaskMessage(task.from, "task_error", { task_id, error_code: "TASK_FAILED", message: body.error || "Failed", retryable: body.retryable ?? false });
+          agent.getSwarm().sendTaskMessage(task.from, "task_error", { task_id, error_code: "TASK_FAILED", message: body.error || "Failed", retryable: body.retryable ?? false });
         } else if (action === "cancel") {
           taskManager.updateTaskStatus(task_id, "cancelled");
-          (agent as any).swarm.sendTaskMessage(task.to === agent.getAgentInfo().agent_id ? task.from : task.to, "task_cancel", { task_id, reason: body.reason });
+          agent.getSwarm().sendTaskMessage(task.to === agent.getAgentInfo().agent_id ? task.from : task.to, "task_cancel", { task_id, reason: body.reason });
         }
         json(res, 200, taskManager.getTask(task_id));
         return;
@@ -494,14 +421,14 @@ function createDaemonApi(
           async () => {
             // Poll all connected peers for tasks
             for (const peerId of targetPeers) {
-              (agent as any).swarm.sendTaskMessage(peerId, "task_poll", {
+              agent.getSwarm().sendTaskMessage(peerId, "task_poll", {
                 capabilities: taskManager.buildHeartbeat().capabilities,
               });
             }
             // Wait a bit for response
-            return new Promise<any>((resolve) => {
+            return new Promise<TrackedTask | null>((resolve) => {
               const timer = setTimeout(() => resolve(null), 5000);
-              taskManager.once("worker:task_received", ({ task }: any) => {
+              taskManager.once("worker:task_received", ({ task }: { task: TrackedTask }) => {
                 clearTimeout(timer);
                 resolve(task);
               });
@@ -622,8 +549,8 @@ function createDaemonApi(
 
       if (req.method === "POST" && path === "/verification/prove") {
         const body = JSON.parse(await readBody(req));
-        const privateKey = (await import("../lib/crypto/keys")).fromBase64(agent.getPrivateKey());
-        const keyId = (agent as any).state?.keyId || "unknown";
+        const privateKey = await getSigningKey(agent);
+        const keyId = agent.getKeyId() || "unknown";
         const proof = verifier.createProof(
           body.task_id,
           body.input,
@@ -671,8 +598,8 @@ function createDaemonApi(
 
       if (req.method === "POST" && path === "/token/issue") {
         const body = JSON.parse(await readBody(req));
-        const privateKey = (await import("../lib/crypto/keys")).fromBase64(agent.getPrivateKey());
-        const keyId = (agent as any).state?.keyId || "unknown";
+        const privateKey = await getSigningKey(agent);
+        const keyId = agent.getKeyId() || "unknown";
         const token = economic.issueToken(
           body.name, body.symbol, body.decimals || 18,
           body.initial_supply || 0, privateKey, keyId
@@ -700,8 +627,8 @@ function createDaemonApi(
 
       if (req.method === "POST" && path === "/token/mint") {
         const body = JSON.parse(await readBody(req));
-        const privateKey = (await import("../lib/crypto/keys")).fromBase64(agent.getPrivateKey());
-        const keyId = (agent as any).state?.keyId || "unknown";
+        const privateKey = await getSigningKey(agent);
+        const keyId = agent.getKeyId() || "unknown";
         const result = economic.mint(body.token_id, body.amount, privateKey, keyId);
         if (result.success) saveEconomicState(dataDir, economic);
         json(res, result.success ? 200 : 422, result);
@@ -710,17 +637,17 @@ function createDaemonApi(
 
       if (req.method === "POST" && path === "/token/transfer") {
         const body = JSON.parse(await readBody(req));
-        const privateKey = (await import("../lib/crypto/keys")).fromBase64(agent.getPrivateKey());
-        const keyId = (agent as any).state?.keyId || "unknown";
+        const privateKey = await getSigningKey(agent);
+        const keyId = agent.getKeyId() || "unknown";
         const myAgentId = agent.getAgentInfo().agent_id;
         const toAgentId = body.to as AgentId;
         const result = economic.transfer(toAgentId, body.token_id, body.amount, privateKey, keyId);
         if (result.success) {
           saveEconomicState(dataDir, economic);
           // Notify recipient via P2P so they can credit their local ledger
-          const swarm = (agent as any).swarm as SwarmTaskApi;
+          const swarm = agent.getSwarm();
           const lastEntry = economic.getLedger(1)[0];
-          swarm.sendTaskMessage(toAgentId, "token_transfer" as any, {
+          swarm.sendTaskMessage(toAgentId, "token_transfer", {
             from: myAgentId,
             to: toAgentId,
             token_id: body.token_id,
@@ -780,8 +707,8 @@ function createDaemonApi(
 
       if (req.method === "POST" && path === "/escrow/lock") {
         const body = JSON.parse(await readBody(req));
-        const privateKey = (await import("../lib/crypto/keys")).fromBase64(agent.getPrivateKey());
-        const keyId = (agent as any).state?.keyId || "unknown";
+        const privateKey = await getSigningKey(agent);
+        const keyId = agent.getKeyId() || "unknown";
         const result = economic.lockEscrow(body.offer_id, privateKey, keyId);
         if (result.success) saveEconomicState(dataDir, economic);
         json(res, result.success ? 200 : 422, result);
@@ -790,8 +717,8 @@ function createDaemonApi(
 
       if (req.method === "POST" && path === "/escrow/release") {
         const body = JSON.parse(await readBody(req));
-        const privateKey = (await import("../lib/crypto/keys")).fromBase64(agent.getPrivateKey());
-        const keyId = (agent as any).state?.keyId || "unknown";
+        const privateKey = await getSigningKey(agent);
+        const keyId = agent.getKeyId() || "unknown";
         const result = economic.releaseEscrow(body.escrow_id, body.proof_id, privateKey, keyId);
         // Update reputation on payment release
         const escrow = economic.getEscrow(body.escrow_id);
@@ -805,8 +732,8 @@ function createDaemonApi(
 
       if (req.method === "POST" && path === "/escrow/refund") {
         const body = JSON.parse(await readBody(req));
-        const privateKey = (await import("../lib/crypto/keys")).fromBase64(agent.getPrivateKey());
-        const keyId = (agent as any).state?.keyId || "unknown";
+        const privateKey = await getSigningKey(agent);
+        const keyId = agent.getKeyId() || "unknown";
         const result = economic.refundEscrow(body.escrow_id, privateKey, keyId);
         if (result.success) saveEconomicState(dataDir, economic);
         json(res, result.success ? 200 : 422, result);
@@ -857,7 +784,7 @@ function createDaemonApi(
             sol_balance_lamports: balance,
             explorer_url: solana.explorerUrl("address", address),
           });
-        } catch (err) {
+        } catch {
           json(res, 200, {
             address,
             network: solana.getNetwork(),
@@ -973,12 +900,11 @@ function createDaemonApi(
 
           // Record in local ledger
           const tokenId = `sol:${mint_address}`;
-          const privateKey = (await import("../lib/crypto/keys")).fromBase64(agent.getPrivateKey());
-          const keyId = (agent as any).state?.keyId || "unknown";
-          // Use a dummy transfer in economic manager to record the ledger entry
-          const myAgentId = agent.getAgentInfo().agent_id;
+          const privateKey = await getSigningKey(agent);
+          const keyId = agent.getKeyId() || "unknown";
+          // TODO(PR3d): model on-chain recipients separately from AgentId-backed local ledger entries.
           economic.transfer(
-            `solana:${to_address}` as any,
+            `solana:${to_address}` as AgentId,
             tokenId,
             amount,
             privateKey,
@@ -1094,8 +1020,8 @@ function createDaemonApi(
 
           // If no token provided, issue a local one
           if (!tokenId) {
-            const privateKey = (await import("../lib/crypto/keys")).fromBase64(agent.getPrivateKey());
-            const keyId = (agent as any).state?.keyId || "unknown";
+            const privateKey = await getSigningKey(agent);
+            const keyId = agent.getKeyId() || "unknown";
             const token = economic.issueToken(name, body.symbol || "TOK", 6, funding_goal || 1000000, privateKey, keyId);
             tokenId = token.token_id;
             saveEconomicState(dataDir, economic);
@@ -1157,8 +1083,8 @@ function createDaemonApi(
       }
 
       if (req.method === "GET" && path === "/project/list") {
-        const status = url.searchParams.get("status") as any;
-        json(res, 200, { projects: projectManager.listProjects(status || undefined) });
+        const status = url.searchParams.get("status") as Project["status"] | null;
+        json(res, 200, { projects: projectManager.listProjects(status ?? undefined) });
         return;
       }
 
@@ -1173,12 +1099,12 @@ function createDaemonApi(
         const body = JSON.parse(await readBody(req));
         const payload = projectManager.toBroadcast(body.project_id);
         if (!payload) { json(res, 404, { error: "Project not found" }); return; }
-        const swarm = (agent as any).swarm as SwarmTaskApi;
+        const swarm = agent.getSwarm();
         let sent = 0;
         const peers = typeof swarm.getConnectedPeers === "function" ? swarm.getConnectedPeers() : [];
         for (const peer of peers) {
           if (peer.connected && peer.agentId) {
-            if (swarm.sendTaskMessage(peer.agentId as AgentId, "project_broadcast" as any, payload)) sent++;
+            if (swarm.sendTaskMessage(peer.agentId, "project_broadcast", payload)) sent++;
           }
         }
         json(res, 200, { broadcast: payload, peers_notified: sent });
@@ -1456,9 +1382,9 @@ function createDaemonApi(
         let notifiedPeers = 0;
         if (body.required_skills && body.required_skills.length > 0) {
           const matches = profileManager.findMatchingPeers(body.required_skills, 0.3);
-          const swarm = (agent as any).swarm as SwarmTaskApi;
+          const swarm = agent.getSwarm();
           for (const match of matches) {
-            if (swarm.sendTaskMessage(match.agent_id as AgentId, "task_notify", {
+            if (swarm.sendTaskMessage(match.agent_id, "task_notify", {
               task_id: record.task_id,
               type: body.type,
               description: body.description,
@@ -1523,7 +1449,7 @@ function createDaemonApi(
           return;
         }
 
-        const swarm = (agent as any).swarm as SwarmTaskApi;
+        const swarm = agent.getSwarm();
         const sent = swarm.sendTaskMessage(originAgentId, "task_bid", {
           task_id: taskId,
           price: body.price,
@@ -1556,7 +1482,7 @@ function createDaemonApi(
         const award = buildAuctionAward(record);
         let notified = false;
         if (award && award.awarded_to !== agent.getAgentInfo().agent_id) {
-          notified = ((agent as any).swarm as SwarmTaskApi).sendTaskMessage(award.awarded_to, "task_award", award);
+          notified = agent.getSwarm().sendTaskMessage(award.awarded_to, "task_award", award);
         }
 
         json(res, 200, { auction: serializeAuction(record, auctionOrigins), notified });
@@ -1579,7 +1505,7 @@ function createDaemonApi(
         const award = buildAuctionAward(record);
         let notified = false;
         if (award && award.awarded_to !== agent.getAgentInfo().agent_id) {
-          notified = ((agent as any).swarm as SwarmTaskApi).sendTaskMessage(award.awarded_to, "task_award", award);
+          notified = agent.getSwarm().sendTaskMessage(award.awarded_to, "task_award", award);
         }
 
         json(res, 200, { auction: serializeAuction(record, auctionOrigins), notified });
@@ -1605,9 +1531,8 @@ function createDaemonApi(
           return;
         }
 
-        const { fromBase64 } = await import("../lib/crypto/keys");
-        const privateKey = fromBase64(agent.getPrivateKey());
-        const keyId = (agent as any).state?.keyId || "unknown";
+        const privateKey = await getSigningKey(agent);
+        const keyId = agent.getKeyId() || "unknown";
         const result = auction.prepareExecution(taskId, privateKey, keyId);
         json(res, result.success ? 200 : 422, result);
         return;
@@ -1622,9 +1547,9 @@ function createDaemonApi(
 
         const body = JSON.parse(await readBody(req));
         const { fromBase64 } = await import("../lib/crypto/keys");
-        const privateKey = fromBase64(agent.getPrivateKey());
+        const privateKey = await getSigningKey(agent);
         const workerPublicKey = fromBase64(body.worker_public_key);
-        const keyId = (agent as any).state?.keyId || "unknown";
+        const keyId = agent.getKeyId() || "unknown";
         const result = auction.finalizeExecution(
           taskId,
           body.proof,
@@ -1697,11 +1622,11 @@ function addDiscoveryRoutes(
 
           // On accept: auto-connect via invite code
           if (action === "accept" && request?.from_agent_id) {
-            const inviteCode = (request as any).invite_code;
+            const inviteCode = request.invite_code;
             if (inviteCode) {
               console.error(`[Discovery] Accepted ${request.from_agent_id} — connecting via invite code ${inviteCode}`);
               // Accept the invite to establish P2P connection
-              inviteManager.accept(inviteCode).then((r: any) => {
+              inviteManager.accept(inviteCode).then((r: InviteResult) => {
                   if (r.success) {
                     console.error(`[Discovery] P2P connected to ${r.peerAgentId} via invite`);
                   } else {
@@ -1734,6 +1659,8 @@ function addDiscoveryRoutes(
     },
   };
 }
+
+type RequestListener = (req: IncomingMessage, res: ServerResponse) => void;
 
 // --- Main ---
 
@@ -1817,7 +1744,7 @@ async function main() {
   });
 
   // Auto-set default peer config when a peer connects (if not already set via invite)
-  (agent as any).swarm.on("peer:identified", (peer: any) => {
+  agent.getSwarm().on("peer:identified", (peer: any) => {
     if (peer.agentId && !taskManager.getPeerConfig(peer.agentId)) {
       taskManager.setPeerConfig(peer.agentId, "restricted");
       console.error(`[Daemon] Auto-configured peer ${peer.agentId} as restricted`);
@@ -1825,7 +1752,7 @@ async function main() {
   });
 
   // Wire up P2P task/heartbeat events to task manager
-  (agent as any).swarm.on("task", ({ from, type, payload }: any) => {
+  agent.getSwarm().on("task", ({ from, type, payload }: any) => {
     console.error(`[Task] ${type} from ${from}: ${payload.task_id || ""}`);
     if (type === "task_broadcast") {
       const broadcast = payload as TaskBroadcast;
@@ -1879,14 +1806,14 @@ async function main() {
     } else if (type === "task_request") {
       const perm = taskManager.checkPermission(from, "task", "send");
       if (!perm.allowed) {
-        (agent as any).swarm.sendTaskMessage(from, "task_reject", { task_id: payload.task_id, reason: "Not permitted" });
+        agent.getSwarm().sendTaskMessage(from, "task_reject", { task_id: payload.task_id, reason: "Not permitted" });
         return;
       }
       // Security scan before accepting
       const scanResult = taskPolicy.checkTask(from, payload);
       if (!scanResult.allowed) {
         console.error(`[Security] BLOCKED task ${payload.task_id} from ${from}: ${scanResult.reason}`);
-        (agent as any).swarm.sendTaskMessage(from, "task_reject", {
+        agent.getSwarm().sendTaskMessage(from, "task_reject", {
           task_id: payload.task_id,
           reason: `Security policy violation: ${scanResult.reason}`,
         });
@@ -1903,7 +1830,7 @@ async function main() {
         fireWebhook("task:received", { task_id: task.task_id, from, type: payload.type, description: payload.description, needs_approval: true });
       } else {
         taskManager.updateTaskStatus(task.task_id, "accepted");
-        (agent as any).swarm.sendTaskMessage(from, "task_accept", { task_id: task.task_id });
+        agent.getSwarm().sendTaskMessage(from, "task_accept", { task_id: task.task_id });
         taskManager.emit("task:auto_accepted", task);
         fireWebhook("task:received", { task_id: task.task_id, from, type: payload.type, description: payload.description });
       }
@@ -1944,13 +1871,13 @@ async function main() {
   economic.on("escrow:released", (d: any) => fireWebhook("escrow:released", d));
 
   // Handle incoming P2P project broadcasts
-  (agent as any).swarm.on("project_broadcast", ({ from, payload }: any) => {
+  agent.getSwarm().on("project_broadcast", ({ from, payload }: any) => {
     console.error(`[Project] Received broadcast from ${from}: ${payload.name} (${payload.project_id})`);
     fireWebhook("project:broadcast", { from, ...payload });
   });
 
   // Handle incoming P2P token transfers
-  (agent as any).swarm.on("token_transfer", ({ from, payload }: any) => {
+  agent.getSwarm().on("token_transfer", ({ from, payload }: any) => {
     console.error(`[Economic] Received token transfer from ${from}: ${payload.amount} of ${payload.token_id}`);
     const transfer = payload as {
       from: AgentId;
@@ -1981,7 +1908,7 @@ async function main() {
     console.error(`[Economic] Credited ${transfer.amount} of ${transfer.token_id} from ${from}`);
   });
 
-  (agent as any).swarm.on("heartbeat", ({ from, payload }: any) => {
+  agent.getSwarm().on("heartbeat", ({ from, payload }: any) => {
     taskManager.emit("heartbeat:received", { from, ...payload });
     // Cache peer profile from heartbeat
     if (payload.profile) {
@@ -1990,13 +1917,13 @@ async function main() {
   });
 
   // Handle task_poll from workers: dequeue a task and send it
-  (agent as any).swarm.on("task_poll", ({ from, capabilities }: any) => {
+  agent.getSwarm().on("task_poll", ({ from, capabilities }: any) => {
     const task = taskManager.dequeue(from, capabilities);
-    (agent as any).swarm.sendTaskMessage(from, "task_poll_response", task || null);
+    agent.getSwarm().sendTaskMessage(from, "task_poll_response", task || null);
   });
 
   // Handle task_poll_response (we're the worker, received a task)
-  (agent as any).swarm.on("task_poll_response", ({ from, task }: any) => {
+  agent.getSwarm().on("task_poll_response", ({ from, task }: any) => {
     if (task) {
       taskManager.emit("worker:task_received", { from, task });
     }
@@ -2014,7 +1941,7 @@ async function main() {
   // Start heartbeat + task queue poll every 30s (attach profile for skill matching)
   taskManager.startHeartbeat(30_000, (hb: Heartbeat) => {
     hb.profile = profileManager.getLocalProfile();
-    (agent as any).swarm.broadcastHeartbeat(hb);
+    agent.getSwarm().broadcastHeartbeat(hb);
   });
 
   // Auto-set peer config on invite success — each side sets its own mode
@@ -2105,7 +2032,7 @@ async function main() {
 
     // Add discovery routes to the HTTP server
     const { handleDiscoveryRoute } = addDiscoveryRoutes(agent, discovery, pendingRequests, inviteManager);
-    const originalListeners = httpServer.listeners('request') as Function[];
+    const originalListeners = httpServer.listeners('request') as RequestListener[];
     httpServer.removeAllListeners('request');
     httpServer.on('request', async (req: IncomingMessage, res: ServerResponse) => {
       const url = new URL(req.url ?? '/', `http://localhost:${config.port}`);
@@ -2122,7 +2049,7 @@ async function main() {
 
   // Fallback: /discovery/agents works even without --discovery-url
   if (!discovery) {
-    const originalListeners2 = httpServer.listeners('request') as Function[];
+    const originalListeners2 = httpServer.listeners('request') as RequestListener[];
     httpServer.removeAllListeners('request');
     httpServer.on('request', async (req: IncomingMessage, res: ServerResponse) => {
       const url = new URL(req.url ?? '/', `http://localhost:${config.port}`);
@@ -2146,7 +2073,7 @@ async function main() {
   }
 
   // Log new inbox messages
-  agent.on("inbox:new", (msg: any) => {
+  agent.on("inbox:new", (msg: SignedMessage) => {
     console.error(
       `[Daemon] New message: ${msg.envelope.message_type} from ${msg.envelope.from}`
     );

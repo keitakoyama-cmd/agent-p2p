@@ -23,6 +23,7 @@ export interface ConnectionRequest {
   from_name: string | null;
   from_contact: string | null;
   message: string | null;
+  invite_code?: string;
   status: string;
   created_at: string;
   expires_at: string;
