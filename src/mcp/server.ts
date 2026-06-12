@@ -68,6 +68,10 @@ function loadApiToken(): string | null {
 const DAEMON_URL = getDaemonUrl();
 const API_TOKEN = loadApiToken();
 
+interface DaemonHealth {
+  agent_id?: string;
+}
+
 // --- Daemon HTTP client ---
 
 function authHeaders(): Record<string, string> {
@@ -439,7 +443,7 @@ async function listResources() {
 async function main() {
   // Verify daemon is reachable
   try {
-    const health = (await daemonGet("/health")) as any;
+    const health = (await daemonGet("/health")) as DaemonHealth;
     console.error(`[MCP] Connected to daemon: ${health.agent_id}`);
   } catch {
     console.error(

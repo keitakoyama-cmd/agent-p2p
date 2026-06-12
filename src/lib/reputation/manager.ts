@@ -18,7 +18,6 @@ import { EventEmitter } from "events";
 import type {
   AgentId,
   ReputationRecord,
-  ReputationSnapshot,
   ReputationPolicy,
   ConnectionMode,
 } from "../../types/protocol";

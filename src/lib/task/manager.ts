@@ -4,17 +4,16 @@
 
 import { EventEmitter } from "events";
 import { randomUUID } from "crypto";
+import { PERMISSION_PRESETS } from "../../types/protocol";
 import type {
   AgentId,
   PeerConfig,
-  PeerPermissions,
   PeerCapability,
   ConnectionMode,
   TaskRequest,
   TaskResult,
   TaskStatus,
   Heartbeat,
-  PERMISSION_PRESETS,
 } from "../../types/protocol";
 
 export interface TrackedTask {
@@ -47,11 +46,10 @@ export class TaskManager extends EventEmitter {
   // --- Peer permissions ---
 
   setPeerConfig(agentId: AgentId, mode: ConnectionMode, namespace?: string): PeerConfig {
-    const { PERMISSION_PRESETS: presets } = require("../../types/protocol");
     const config: PeerConfig = {
       agent_id: agentId,
       mode,
-      permissions: { ...presets[mode] },
+      permissions: { ...PERMISSION_PRESETS[mode] },
       connected_at: new Date().toISOString(),
       shared_namespace: namespace,
     };

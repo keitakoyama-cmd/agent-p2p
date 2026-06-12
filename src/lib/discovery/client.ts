@@ -28,6 +28,21 @@ export interface ConnectionRequest {
   expires_at: string;
 }
 
+export interface PublicAgentListing {
+  agent_id: string;
+  org_id?: string;
+  public_key?: string;
+  capabilities?: string[] | string;
+  description?: string | null;
+  registered_at?: string;
+  [key: string]: unknown;
+}
+
+export interface AgentListResponse {
+  agents: PublicAgentListing[];
+  meta?: unknown;
+}
+
 function signBody(body: Record<string, unknown>, privateKeyB64: string): Record<string, unknown> {
   const signingInput = new TextEncoder().encode(canonicalJson(body));
   const signature = sign(signingInput, fromBase64(privateKeyB64));
@@ -135,9 +150,9 @@ export class DiscoveryClient {
   }
 
   /** List all public agents on the discovery site */
-  async listAgents(): Promise<{ agents: any[]; meta?: any }> {
+  async listAgents(): Promise<AgentListResponse> {
     const res = await fetch(`${this.config.discoveryUrl}/api/agents`);
-    return res.json() as Promise<{ agents: any[]; meta?: any }>;
+    return res.json() as Promise<AgentListResponse>;
   }
 
   /** Stop polling */

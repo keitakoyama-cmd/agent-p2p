@@ -25,7 +25,7 @@ import type {
   TaskAward,
   AuctionStatus,
   AuctionRecord,
-  BidSelectionStrategy,
+  ExecutionProof,
 } from "../../types/protocol";
 import type { ReputationManager } from "../reputation/manager";
 import type { EconomicManager } from "../economic/wallet";
@@ -407,7 +407,7 @@ export class AuctionManager extends EventEmitter {
    */
   finalizeExecution(
     taskId: string,
-    proof: any, // ExecutionProof
+    proof: ExecutionProof,
     expectedInput: Record<string, unknown>,
     receivedOutput: Record<string, unknown>,
     workerPublicKey: Uint8Array,

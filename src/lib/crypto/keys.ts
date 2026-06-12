@@ -7,8 +7,7 @@ import {
 import { randomBytes, createHash } from "crypto";
 
 // noble/ed25519 v3 requires hashes.sha512 to be set for sync operations
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-(hashes as any).sha512 = (message: Uint8Array): Uint8Array => {
+hashes.sha512 = (message: Uint8Array): Uint8Array => {
   return new Uint8Array(createHash("sha512").update(message).digest());
 };
 

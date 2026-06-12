@@ -15,7 +15,7 @@
  *   - On reconnection, queued messages are flushed
  */
 
-import Hyperswarm from "hyperswarm";
+import Hyperswarm, { type HyperswarmPeerInfo } from "hyperswarm";
 import { createHash } from "crypto";
 import { EventEmitter } from "events";
 import type { SignedMessage, AgentId } from "../../types/protocol";
@@ -24,7 +24,7 @@ import { sign, toBase64 } from "../crypto/keys";
 export interface PeerConnection {
   remotePublicKey: string; // hex (Hyperswarm Noise key)
   agentId?: AgentId;
-  stream: any;
+  stream: NodeJS.ReadWriteStream;
   connected: boolean;
   verified: boolean; // handshake signature verified
 }
@@ -44,8 +44,41 @@ interface QueuedMessage {
   retries: number;
 }
 
+export interface P2PMessageEvent {
+  from?: AgentId;
+  remoteKey: string;
+  message: SignedMessage;
+}
+
+export interface P2PFileEvent {
+  from?: AgentId;
+  filename: string;
+  data: string;
+  size: number;
+  mime: string;
+}
+
+interface HandshakeMessage {
+  type: "handshake";
+  agent_id: AgentId;
+  challenge: string;
+  signature?: string;
+}
+
+interface PeerWireMessage extends Record<string, unknown> {
+  type: string;
+}
+
+function isPeerWireMessage(value: unknown): value is PeerWireMessage {
+  return (
+    typeof value === "object"
+    && value !== null
+    && typeof (value as { type?: unknown }).type === "string"
+  );
+}
+
 export class P2PSwarm extends EventEmitter {
-  private swarm: any;
+  private swarm!: Hyperswarm;
   private topic: Buffer;
   private peers: Map<string, PeerConnection> = new Map();
   private outboundQueue: QueuedMessage[] = [];
@@ -61,12 +94,12 @@ export class P2PSwarm extends EventEmitter {
   }
 
   async start(): Promise<void> {
-    const opts: any = {};
+    const opts: { seed?: Buffer } = {};
     if (this.config.seed) opts.seed = this.config.seed;
 
     this.swarm = new Hyperswarm(opts);
 
-    this.swarm.on("connection", (socket: any, peerInfo: any) => {
+    this.swarm.on("connection", (socket: NodeJS.ReadWriteStream, peerInfo: HyperswarmPeerInfo) => {
       const remoteKey = peerInfo.publicKey.toString("hex");
       console.error(`[P2P] Peer connected: ${remoteKey.slice(0, 12)}...`);
 
@@ -80,7 +113,7 @@ export class P2PSwarm extends EventEmitter {
 
       // Send handshake with signed challenge
       const challenge = Date.now().toString();
-      const handshake: any = {
+      const handshake: HandshakeMessage = {
         type: "handshake",
         agent_id: this.agentId,
         challenge,
@@ -106,7 +139,7 @@ export class P2PSwarm extends EventEmitter {
           const line = buffer.subarray(0, nlIndex);
           buffer = buffer.subarray(nlIndex + 1);
           try {
-            const msg = JSON.parse(line.toString("utf8"));
+            const msg: unknown = JSON.parse(line.toString("utf8"));
             this.handlePeerMessage(remoteKey, msg);
           } catch (err) {
             console.error(
@@ -308,7 +341,7 @@ export class P2PSwarm extends EventEmitter {
     this.outboundQueue = remaining;
   }
 
-  private sendRaw(stream: any, data: unknown): boolean {
+  private sendRaw(stream: NodeJS.WritableStream, data: unknown): boolean {
     try {
       stream.write(JSON.stringify(data) + "\n");
       return true;
@@ -317,13 +350,19 @@ export class P2PSwarm extends EventEmitter {
     }
   }
 
-  private handlePeerMessage(remoteKey: string, msg: any): void {
+  private handlePeerMessage(remoteKey: string, msg: unknown): void {
     const peer = this.peers.get(remoteKey);
     if (!peer) return;
+    if (!isPeerWireMessage(msg)) {
+      console.error(`[P2P] Unknown message from ${remoteKey.slice(0, 12)}`);
+      return;
+    }
 
     switch (msg.type) {
       case "handshake":
-        peer.agentId = msg.agent_id;
+        if (typeof msg.agent_id === "string") {
+          peer.agentId = msg.agent_id as AgentId;
+        }
         // In production, verify msg.signature against known public keys
         peer.verified = true;
         console.error(`[P2P] Peer identified: ${msg.agent_id}`);
@@ -344,18 +383,18 @@ export class P2PSwarm extends EventEmitter {
           from: peer.agentId,
           remoteKey,
           message: msg.payload as SignedMessage,
-        });
+        } satisfies P2PMessageEvent);
         break;
 
       case "file_transfer":
         if (!peer.verified) return;
         this.emit("file", {
           from: peer.agentId,
-          filename: msg.filename,
-          data: msg.data,
-          size: msg.size,
-          mime: msg.mime,
-        });
+          filename: msg.filename as string,
+          data: msg.data as string,
+          size: msg.size as number,
+          mime: msg.mime as string,
+        } satisfies P2PFileEvent);
         break;
 
       case "task_request":

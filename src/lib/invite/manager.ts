@@ -54,10 +54,22 @@ function topicFromCode(code: string): Buffer {
   return createHash("sha256").update(`agent-p2p-invite:${code}`).digest();
 }
 
+interface InviteWireMessage extends Record<string, unknown> {
+  type: string;
+}
+
+function isInviteWireMessage(value: unknown): value is InviteWireMessage {
+  return (
+    typeof value === "object"
+    && value !== null
+    && typeof (value as { type?: unknown }).type === "string"
+  );
+}
+
 export class InviteManager extends EventEmitter {
   private agentId: AgentId;
   private pendingInvites = new Map<string, Invite>();
-  private activeSwarms = new Map<string, any>();
+  private activeSwarms = new Map<string, Hyperswarm>();
 
   constructor(agentId: AgentId) {
     super();
@@ -82,7 +94,7 @@ export class InviteManager extends EventEmitter {
     const swarm = new Hyperswarm();
     this.activeSwarms.set(code, swarm);
 
-    swarm.on("connection", (socket: any) => {
+    swarm.on("connection", (socket: NodeJS.ReadWriteStream) => {
       socket.on("error", () => {}); // Suppress ECONNRESET on cleanup
       let buffer = Buffer.alloc(0);
       socket.on("data", (chunk: Buffer) => {
@@ -93,7 +105,8 @@ export class InviteManager extends EventEmitter {
         buffer = buffer.subarray(nlIndex + 1);
 
         try {
-          const msg = JSON.parse(line);
+          const msg: unknown = JSON.parse(line);
+          if (!isInviteWireMessage(msg)) return;
           if (msg.type === "invite_accept" && msg.code === code) {
             // Verify invite is still valid
             const inv = this.pendingInvites.get(code);
@@ -103,7 +116,7 @@ export class InviteManager extends EventEmitter {
             }
 
             // Derive shared namespace from invite code + both agent IDs
-            const sharedNs = deriveSharedNamespace(code, this.agentId, msg.agent_id);
+            const sharedNs = deriveSharedNamespace(code, this.agentId, msg.agent_id as string);
 
             // Send confirmation with our agent ID + shared namespace + our mode
             this.sendJson(socket, {
@@ -117,8 +130,8 @@ export class InviteManager extends EventEmitter {
             // Emit event with shared namespace + both modes
             this.emit("invite:accepted", {
               code,
-              peerAgentId: msg.agent_id,
-              peerMode: msg.mode || "restricted",
+              peerAgentId: msg.agent_id as string,
+              peerMode: (msg.mode as ConnectionMode | undefined) || "restricted",
               myMode: inv.mode,
               sharedNamespace: sharedNs,
             });
@@ -164,7 +177,7 @@ export class InviteManager extends EventEmitter {
         }
       }, timeoutMs);
 
-      swarm.on("connection", (socket: any) => {
+      swarm.on("connection", (socket: NodeJS.ReadWriteStream) => {
         socket.on("error", () => {}); // Suppress ECONNRESET on cleanup
 
         // Send our accept message with our mode preference
@@ -184,7 +197,8 @@ export class InviteManager extends EventEmitter {
           buffer = buffer.subarray(nlIndex + 1);
 
           try {
-            const msg = JSON.parse(line);
+            const msg: unknown = JSON.parse(line);
+            if (!isInviteWireMessage(msg)) return;
             if (msg.type === "invite_result" && !resolved) {
               resolved = true;
               clearTimeout(timer);
@@ -193,14 +207,19 @@ export class InviteManager extends EventEmitter {
               if (msg.success) {
                 this.emit("invite:connected", {
                   code,
-                  peerAgentId: msg.agent_id,
-                  peerMode: msg.mode || "restricted",
+                  peerAgentId: msg.agent_id as string,
+                  peerMode: (msg.mode as ConnectionMode | undefined) || "restricted",
                   myMode: mode,
-                  sharedNamespace: msg.shared_namespace,
+                  sharedNamespace: msg.shared_namespace as string,
                 });
-                resolve({ success: true, peerAgentId: msg.agent_id, peerMode: msg.mode, sharedNamespace: msg.shared_namespace });
+                resolve({
+                  success: true,
+                  peerAgentId: msg.agent_id as string,
+                  peerMode: msg.mode as ConnectionMode | undefined,
+                  sharedNamespace: msg.shared_namespace as string,
+                });
               } else {
-                resolve({ success: false, error: msg.error });
+                resolve({ success: false, error: msg.error as string | undefined });
               }
             }
           } catch {}
@@ -218,7 +237,7 @@ export class InviteManager extends EventEmitter {
     return Array.from(this.pendingInvites.values()).filter(i => i.expiresAt > now);
   }
 
-  private sendJson(socket: any, data: unknown) {
+  private sendJson(socket: NodeJS.WritableStream, data: unknown) {
     socket.write(JSON.stringify(data) + "\n");
   }
 

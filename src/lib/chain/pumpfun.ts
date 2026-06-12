@@ -10,6 +10,7 @@ import {
   Transaction, TransactionInstruction, SystemProgram,
   sendAndConfirmTransaction, ComputeBudgetProgram,
 } from "@solana/web3.js";
+import { createHash } from "crypto";
 import {
   getAssociatedTokenAddress, createAssociatedTokenAccountInstruction,
   getAccount, TOKEN_PROGRAM_ID,
@@ -30,7 +31,6 @@ const BUY_DISCRIMINATOR = Buffer.from([102, 6, 61, 18, 1, 218, 235, 234]);
 const SELL_DISCRIMINATOR = Buffer.from([51, 230, 133, 164, 1, 127, 131, 173]);
 // collect_creator_fee: Anchor discriminator hash("global:collect_creator_fee")[0..8]
 const COLLECT_CREATOR_FEE_DISCRIMINATOR = (() => {
-  const { createHash } = require("crypto");
   return Buffer.from(createHash("sha256").update("global:collect_creator_fee").digest().subarray(0, 8));
 })();
 
@@ -51,6 +51,14 @@ export interface PumpFunConfig { rpcUrl?: string; }
 export interface LaunchResult { success: boolean; mintAddress?: string; txSignature?: string; bondingCurveAddress?: string; explorerUrl?: string; pumpFunUrl?: string; error?: string; }
 export interface TradeResult { success: boolean; txSignature?: string; explorerUrl?: string; error?: string; }
 
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "object" && err !== null && "message" in err) {
+    return String((err as { message: unknown }).message);
+  }
+  return String(err);
+}
+
 export class PumpFunClient {
   private connection: Connection;
   private sdk: PumpFunSDK;
@@ -64,7 +72,7 @@ export class PumpFunClient {
 
   async launch(
     creator: Keypair, name: string, symbol: string, description: string,
-    imageBuffer: Buffer, imageName = "token.png", initialBuySol = 0,
+    imageBuffer: Buffer, _imageName = "token.png", initialBuySol = 0,
     options: { twitter?: string; telegram?: string; website?: string; priorityFees?: PriorityFee; slippageBasisPoints?: number } = {}
   ): Promise<LaunchResult> {
     try {
@@ -89,7 +97,7 @@ export class PumpFunClient {
         explorerUrl: `https://solscan.io/tx/${result.signature}`,
         pumpFunUrl: `https://pump.fun/coin/${mintAddress}`,
       };
-    } catch (err: any) { return { success: false, error: err.message }; }
+    } catch (err: unknown) { return { success: false, error: getErrorMessage(err) }; }
   }
 
   /**
@@ -157,7 +165,7 @@ export class PumpFunClient {
 
       const sig = await sendAndConfirmTransaction(this.connection, tx, [buyer], { commitment: "confirmed" });
       return { success: true, txSignature: sig, explorerUrl: `https://solscan.io/tx/${sig}` };
-    } catch (err: any) { return { success: false, error: err.message }; }
+    } catch (err: unknown) { return { success: false, error: getErrorMessage(err) }; }
   }
 
   /**
@@ -218,7 +226,7 @@ export class PumpFunClient {
 
       const sig = await sendAndConfirmTransaction(this.connection, tx, [seller], { commitment: "confirmed" });
       return { success: true, txSignature: sig, explorerUrl: `https://solscan.io/tx/${sig}` };
-    } catch (err: any) { return { success: false, error: err.message }; }
+    } catch (err: unknown) { return { success: false, error: getErrorMessage(err) }; }
   }
 
   /**
@@ -257,8 +265,8 @@ export class PumpFunClient {
         txSignature: sig,
         explorerUrl: `https://solscan.io/tx/${sig}`,
       };
-    } catch (err: any) {
-      return { success: false, error: err.message };
+    } catch (err: unknown) {
+      return { success: false, error: getErrorMessage(err) };
     }
   }
 

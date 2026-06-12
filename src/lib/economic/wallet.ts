@@ -21,13 +21,17 @@ import type {
   Signature,
   TokenDefinition,
   Wallet,
+  ChainType,
   PaymentOffer,
-  EscrowStatus,
   EscrowRecord,
   LedgerEntry,
 } from "../../types/protocol";
 import { canonicalJson } from "../crypto/signing";
 import { sign, toBase64 } from "../crypto/keys";
+
+type ExternalWalletChain = Exclude<ChainType, "local">;
+type ExternalWalletAddressKey = `${ExternalWalletChain}_address`;
+type WalletWithExternalAddresses = Wallet & Partial<Record<ExternalWalletAddressKey, string>>;
 
 export class EconomicManager extends EventEmitter {
   private tokens = new Map<string, TokenDefinition>();
@@ -125,7 +129,8 @@ export class EconomicManager extends EventEmitter {
   connectWallet(agentId: AgentId, chain: "ethereum" | "solana" | "custom", address: string): Wallet {
     const wallet = this.ensureWallet(agentId);
     // Store external address as metadata (wallet_id stays agent-based)
-    (wallet as any)[`${chain}_address`] = address;
+    const addressKey = `${chain}_address` as ExternalWalletAddressKey;
+    (wallet as WalletWithExternalAddresses)[addressKey] = address;
     wallet.chain = chain;
     wallet.address = address;
     this.emit("wallet:connected", { agent_id: agentId, chain, address });
@@ -545,6 +550,6 @@ export class EconomicManager extends EventEmitter {
 }
 
 function hashLedgerEntry(entry: LedgerEntry): string {
-  const { signature, ...rest } = entry;
+  const { signature: _signature, ...rest } = entry;
   return createHash("sha256").update(canonicalJson(rest)).digest("hex");
 }
