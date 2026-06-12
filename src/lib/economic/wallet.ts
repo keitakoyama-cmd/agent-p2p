@@ -33,6 +33,14 @@ type ExternalWalletChain = Exclude<ChainType, "local">;
 type ExternalWalletAddressKey = `${ExternalWalletChain}_address`;
 type WalletWithExternalAddresses = Wallet & Partial<Record<ExternalWalletAddressKey, string>>;
 
+/** Payload of the "transfer:completed" / "transfer:received" events. */
+export interface TransferEvent {
+  from: AgentId;
+  to: AgentId;
+  token_id: string;
+  amount: number;
+}
+
 export class EconomicManager extends EventEmitter {
   private tokens = new Map<string, TokenDefinition>();
   private wallets = new Map<string, Wallet>();          // agent_id → wallet
@@ -200,7 +208,7 @@ export class EconomicManager extends EventEmitter {
       entry_type: "transfer",
     }, privateKey, keyId);
 
-    this.emit("transfer:completed", { from: this.agentId, to, token_id: tokenId, amount });
+    this.emit("transfer:completed", { from: this.agentId, to, token_id: tokenId, amount } satisfies TransferEvent);
     return { success: true };
   }
 
@@ -236,7 +244,7 @@ export class EconomicManager extends EventEmitter {
     }
     this.ledger.push(entry);
 
-    this.emit("transfer:received", { from, to: this.agentId, token_id: tokenId, amount });
+    this.emit("transfer:received", { from, to: this.agentId, token_id: tokenId, amount } satisfies TransferEvent);
   }
 
   // ============================================================

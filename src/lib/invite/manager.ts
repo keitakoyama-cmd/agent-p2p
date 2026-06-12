@@ -32,6 +32,19 @@ export interface InviteResult {
   error?: string;
 }
 
+/**
+ * Payload of the "invite:accepted" / "invite:connected" events.
+ * `peerAgentId` is the peer's self-reported ID string from the invite wire
+ * handshake (not validated as an AgentId here).
+ */
+export interface InviteConnectionEvent {
+  code: string;
+  peerAgentId: string;
+  peerMode: ConnectionMode;
+  myMode: ConnectionMode;
+  sharedNamespace: string;
+}
+
 function deriveSharedNamespace(code: string, agentIdA: string, agentIdB: string): string {
   const sorted = [agentIdA, agentIdB].sort();
   return createHash("sha256")
@@ -134,7 +147,7 @@ export class InviteManager extends EventEmitter {
               peerMode: (msg.mode as ConnectionMode | undefined) || "restricted",
               myMode: inv.mode,
               sharedNamespace: sharedNs,
-            });
+            } satisfies InviteConnectionEvent);
 
             // Cleanup
             this.pendingInvites.delete(code);
@@ -211,7 +224,7 @@ export class InviteManager extends EventEmitter {
                   peerMode: (msg.mode as ConnectionMode | undefined) || "restricted",
                   myMode: mode,
                   sharedNamespace: msg.shared_namespace as string,
-                });
+                } satisfies InviteConnectionEvent);
                 resolve({
                   success: true,
                   peerAgentId: msg.agent_id as string,
