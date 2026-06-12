@@ -57,6 +57,13 @@ export interface Project {
   completed_at?: string;
 }
 
+/** Payload of the "project:investment" event. */
+export interface ProjectInvestmentEvent {
+  project_id: string;
+  investor: string;
+  amount: number;
+}
+
 export class ProjectManager extends EventEmitter {
   private projects = new Map<string, Project>();
 
@@ -136,7 +143,7 @@ export class ProjectManager extends EventEmitter {
       this.emit("project:funded", project);
     }
 
-    this.emit("project:investment", { project_id: projectId, investor, amount });
+    this.emit("project:investment", { project_id: projectId, investor, amount } satisfies ProjectInvestmentEvent);
     return { success: true, project };
   }
 

@@ -22,6 +22,14 @@ import type {
   ConnectionMode,
 } from "../../types/protocol";
 
+/** Payload of the "reputation:mode_suggestion" event (see checkThresholds). */
+export interface ReputationModeSuggestion {
+  agent_id: AgentId;
+  score: number;
+  suggested_mode: ConnectionMode;
+  reason: string;
+}
+
 const DEFAULT_POLICY: ReputationPolicy = {
   demote_threshold: 0.3,
   promote_threshold: 0.8,
@@ -187,7 +195,7 @@ export class ReputationManager extends EventEmitter {
         reason: suggestedMode === "readonly"
           ? `Score ${record.score.toFixed(3)} below demote threshold ${this.policy.demote_threshold}`
           : `Score ${record.score.toFixed(3)} above promote threshold ${this.policy.promote_threshold}`,
-      });
+      } satisfies ReputationModeSuggestion);
     }
   }
 

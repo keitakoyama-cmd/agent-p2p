@@ -48,6 +48,19 @@ export interface PlanState {
   completed_at?: number;
 }
 
+/** Payload of the "step:enqueued" event. */
+export interface PlanStepEnqueued {
+  planId: string;
+  stepId: string;
+  taskId: string;
+}
+
+/** Payload of the "plan:completed" event (only terminal statuses are emitted). */
+export interface PlanCompleted {
+  planId: string;
+  status: "completed" | "failed";
+}
+
 export class TaskPlanner extends EventEmitter {
   private taskManager: TaskManager;
   private plans = new Map<string, PlanState>();
@@ -153,7 +166,7 @@ export class TaskPlanner extends EventEmitter {
       state.step_tasks[step.id] = task.task_id;
       console.error(`[Planner] Enqueued step ${step.id} → task ${task.task_id}`);
 
-      this.emit("step:enqueued", { planId: state.plan.id, stepId: step.id, taskId: task.task_id });
+      this.emit("step:enqueued", { planId: state.plan.id, stepId: step.id, taskId: task.task_id } satisfies PlanStepEnqueued);
     }
   }
 
@@ -176,7 +189,7 @@ export class TaskPlanner extends EventEmitter {
           state.status = anyFailed ? "failed" : "completed";
           state.completed_at = Date.now();
           console.error(`[Planner] Plan ${state.plan.id} ${state.status} (${Date.now() - (state.started_at || 0)}ms)`);
-          this.emit("plan:completed", { planId: state.plan.id, status: state.status });
+          this.emit("plan:completed", { planId: state.plan.id, status: state.status } satisfies PlanCompleted);
         } else {
           // Enqueue next steps
           this.enqueueReady(state);

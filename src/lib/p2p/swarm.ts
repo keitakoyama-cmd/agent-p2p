@@ -58,6 +58,35 @@ export interface P2PFileEvent {
   mime: string;
 }
 
+/**
+ * Re-emitted wire events (handlePeerMessage). `from` is the peer's
+ * self-reported agent ID from the handshake and may be absent.
+ * Wire payload fields are untrusted JSON, hence `unknown`.
+ */
+export interface SwarmTaskEvent {
+  from?: AgentId;
+  type: string;
+  payload: unknown;
+}
+
+/** "task_poll" event payload. */
+export interface SwarmTaskPollEvent {
+  from?: AgentId;
+  capabilities: unknown;
+}
+
+/** "task_poll_response" event payload. */
+export interface SwarmTaskPollResponseEvent {
+  from?: AgentId;
+  task: unknown;
+}
+
+/** "token_transfer" / "project_broadcast" / "heartbeat" event payload. */
+export interface SwarmPayloadEvent {
+  from?: AgentId;
+  payload: unknown;
+}
+
 interface HandshakeMessage {
   type: "handshake";
   agent_id: AgentId;
@@ -407,32 +436,32 @@ export class P2PSwarm extends EventEmitter {
       case "task_bid":
       case "task_award":
         if (!peer.verified) return;
-        this.emit("task", { from: peer.agentId, type: msg.type, payload: msg.payload });
+        this.emit("task", { from: peer.agentId, type: msg.type, payload: msg.payload } satisfies SwarmTaskEvent);
         break;
 
       case "task_poll":
         if (!peer.verified) return;
-        this.emit("task_poll", { from: peer.agentId, capabilities: msg.capabilities });
+        this.emit("task_poll", { from: peer.agentId, capabilities: msg.capabilities } satisfies SwarmTaskPollEvent);
         break;
 
       case "task_poll_response":
         if (!peer.verified) return;
-        this.emit("task_poll_response", { from: peer.agentId, task: msg.task });
+        this.emit("task_poll_response", { from: peer.agentId, task: msg.task } satisfies SwarmTaskPollResponseEvent);
         break;
 
       case "token_transfer":
         if (!peer.verified) return;
-        this.emit("token_transfer", { from: peer.agentId, payload: msg.payload });
+        this.emit("token_transfer", { from: peer.agentId, payload: msg.payload } satisfies SwarmPayloadEvent);
         break;
 
       case "project_broadcast":
         if (!peer.verified) return;
-        this.emit("project_broadcast", { from: peer.agentId, payload: msg.payload });
+        this.emit("project_broadcast", { from: peer.agentId, payload: msg.payload } satisfies SwarmPayloadEvent);
         break;
 
       case "heartbeat":
         if (!peer.verified) return;
-        this.emit("heartbeat", { from: peer.agentId, payload: msg.payload });
+        this.emit("heartbeat", { from: peer.agentId, payload: msg.payload } satisfies SwarmPayloadEvent);
         break;
 
       default:
