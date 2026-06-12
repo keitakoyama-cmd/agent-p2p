@@ -12,7 +12,6 @@ import { v4 as uuidv4 } from "uuid";
 import type {
   SignedMessage,
   InvoiceIssuePayload,
-  AgentId,
 } from "../../types/protocol";
 import { computePayloadHash } from "../crypto";
 import { validateTransport } from "../validation/transport";

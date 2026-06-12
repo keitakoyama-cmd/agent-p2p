@@ -16,8 +16,6 @@ import {
   Keypair,
   PublicKey,
   LAMPORTS_PER_SOL,
-  Transaction,
-  sendAndConfirmTransaction,
   clusterApiUrl,
 } from "@solana/web3.js";
 import {
@@ -28,7 +26,6 @@ import {
   transfer as splTransfer,
   getMint,
   getAccount,
-  TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 
 export type SolanaNetwork = "devnet" | "mainnet-beta";
@@ -47,6 +44,22 @@ export interface TokenMintResult {
 export interface TransferResult {
   txSignature: string;
   explorerUrl: string;
+}
+
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "object" && err !== null && "message" in err) {
+    return String((err as { message: unknown }).message);
+  }
+  return String(err);
+}
+
+function getErrorName(err: unknown): string | undefined {
+  if (err instanceof Error) return err.name;
+  if (typeof err === "object" && err !== null && "name" in err) {
+    return String((err as { name: unknown }).name);
+  }
+  return undefined;
 }
 
 export class SolanaClient {
@@ -115,9 +128,10 @@ export class SolanaClient {
         );
         await this.connection.confirmTransaction(sig, "confirmed");
         return sig;
-      } catch (err: any) {
-        lastError = err;
-        if (err.message?.includes("429") || err.message?.includes("Too Many Requests")) {
+      } catch (err: unknown) {
+        const message = getErrorMessage(err);
+        lastError = err instanceof Error ? err : new Error(message);
+        if (message.includes("429") || message.includes("Too Many Requests")) {
           const delay = 2000 * 2 ** attempt; // 2s, 4s, 8s, 16s, 32s
           console.error(`[Solana] Airdrop rate limited, retrying in ${delay}ms...`);
           await new Promise(r => setTimeout(r, delay));
@@ -250,10 +264,10 @@ export class SolanaClient {
       const rawAmount = account.amount.toString();
       const amount = Number(account.amount) / 10 ** mintInfo.decimals;
       return { amount, rawAmount, decimals: mintInfo.decimals };
-    } catch (err: any) {
+    } catch (err: unknown) {
       // Account doesn't exist = 0 balance
-      if (err.message?.includes("could not find account") ||
-          err.name === "TokenAccountNotFoundError") {
+      if (getErrorMessage(err).includes("could not find account") ||
+          getErrorName(err) === "TokenAccountNotFoundError") {
         return { amount: 0, rawAmount: "0", decimals: 0 };
       }
       throw err;

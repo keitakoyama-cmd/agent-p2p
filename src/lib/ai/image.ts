@@ -12,6 +12,35 @@ export interface ImageResult {
   error?: string;
 }
 
+interface GeminiResponse {
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{
+        inlineData?: {
+          mimeType?: string;
+          data: string;
+        };
+      }>;
+    };
+  }>;
+}
+
+interface OpenAIImageResponse {
+  data?: Array<{
+    b64_json?: string;
+    url?: string;
+  }>;
+  error?: unknown;
+}
+
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "object" && err !== null && "message" in err) {
+    return String((err as { message: unknown }).message);
+  }
+  return String(err);
+}
+
 /**
  * Generate a project/token icon image.
  * Tries OpenAI first, falls back to Gemini.
@@ -42,7 +71,7 @@ export async function generateIcon(
           }),
         }
       );
-      const data = await res.json() as any;
+      const data = await res.json() as GeminiResponse;
       const parts = data.candidates?.[0]?.content?.parts || [];
       for (const part of parts) {
         if (part.inlineData?.mimeType?.startsWith("image/")) {
@@ -63,7 +92,7 @@ export async function generateIcon(
         },
         body: JSON.stringify({ model: "gpt-image-1", prompt, n: 1, size: "1024x1024" }),
       });
-      const data = await res.json() as any;
+      const data = await res.json() as OpenAIImageResponse;
       if (data.data?.[0]?.b64_json) {
         return { success: true, buffer: Buffer.from(data.data[0].b64_json, "base64") };
       }
@@ -85,8 +114,8 @@ export async function generateIcon(
       const result = await provider();
       if (result.success) return result;
       console.error(`[AI Image] Provider failed: ${result.error}`);
-    } catch (err: any) {
-      console.error(`[AI Image] Provider error: ${err.message}`);
+    } catch (err: unknown) {
+      console.error(`[AI Image] Provider error: ${getErrorMessage(err)}`);
     }
   }
 

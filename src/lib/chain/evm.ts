@@ -7,10 +7,9 @@
  *   - Base / Ethereum mainnet for production
  */
 
-import { ethers } from "ethers";
+import { ethers, type InterfaceAbi } from "ethers";
 import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
+import { join } from "path";
 
 export type EVMNetwork = "local" | "base-sepolia" | "base" | "ethereum";
 
@@ -31,7 +30,7 @@ export interface TxResult {
 }
 
 // Load compiled contract (ABI + bytecode)
-function loadCompiledContract(): { abi: any[]; bytecode: string } {
+function loadCompiledContract(): { abi: InterfaceAbi; bytecode: string } {
   // Try multiple resolution paths
   const candidates = [
     join(__dirname, "erc20-compiled.json"),
@@ -39,7 +38,7 @@ function loadCompiledContract(): { abi: any[]; bytecode: string } {
   ];
   for (const p of candidates) {
     try {
-      return JSON.parse(readFileSync(p, "utf8"));
+      return JSON.parse(readFileSync(p, "utf8")) as { abi: InterfaceAbi; bytecode: string };
     } catch {}
   }
   throw new Error("Cannot find erc20-compiled.json");

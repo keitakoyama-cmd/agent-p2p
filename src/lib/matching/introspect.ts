@@ -13,7 +13,12 @@
 
 import { existsSync, readFileSync, readdirSync } from "fs";
 import { join } from "path";
-import type { SkillEntry, SkillLevel, CapabilityTier } from "../../types/protocol";
+import type { SkillEntry, CapabilityTier } from "../../types/protocol";
+
+interface PackageJsonLike {
+  dependencies?: Record<string, unknown>;
+  devDependencies?: Record<string, unknown>;
+}
 
 /** Mapping from npm package name (or pattern) to skill */
 const NPM_SKILL_MAP: Record<string, { domain: string; skill: string }> = {
@@ -106,7 +111,7 @@ export class WorkspaceIntrospector {
    * Parse package.json object and extract skills.
    * Public and static for testability (no filesystem access).
    */
-  static parsePackageJson(pkg: Record<string, any>): SkillEntry[] {
+  static parsePackageJson(pkg: PackageJsonLike): SkillEntry[] {
     const seen = new Set<string>();
     const skills: SkillEntry[] = [];
 
@@ -236,7 +241,7 @@ export class WorkspaceIntrospector {
     const pkgPath = join(dir, "package.json");
     if (existsSync(pkgPath)) {
       try {
-        const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+        const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as PackageJsonLike;
         addUnique(WorkspaceIntrospector.parsePackageJson(pkg));
       } catch { /* skip malformed */ }
     }

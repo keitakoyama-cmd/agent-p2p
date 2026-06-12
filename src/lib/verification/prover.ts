@@ -19,13 +19,11 @@
 import { createHash, randomBytes } from "crypto";
 import { EventEmitter } from "events";
 import type {
-  AgentId,
-  Signature,
   ExecutionProof,
   ExecutionChallenge,
   VerificationResult,
 } from "../../types/protocol";
-import { canonicalJson, computePayloadHash } from "../crypto/signing";
+import { canonicalJson } from "../crypto/signing";
 import { sign, verify, toBase64, fromBase64 } from "../crypto/keys";
 
 /** Max age of a proof timestamp to be considered valid (5 minutes) */

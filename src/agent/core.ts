@@ -14,14 +14,19 @@ import { EventEmitter } from "events";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { dirname, join } from "path";
 
-import { P2PSwarm } from "../lib/p2p/swarm";
+import {
+  P2PSwarm,
+  type P2PFileEvent,
+  type P2PMessageEvent,
+  type PeerConnection,
+} from "../lib/p2p/swarm";
 import {
   generateKeyPair,
   toBase64,
   fromBase64,
   type KeyPair,
 } from "../lib/crypto/keys";
-import { computePayloadHash, signEnvelope, verifyEnvelope } from "../lib/crypto/signing";
+import { computePayloadHash, signEnvelope } from "../lib/crypto/signing";
 import {
   encryptPrivateKey,
   decryptPrivateKey,
@@ -36,7 +41,6 @@ import type {
   SignedMessage,
   Envelope,
   MessageType,
-  AgentRegistryEntry,
 } from "../types/protocol";
 
 // --- Persisted agent state ---
@@ -95,12 +99,12 @@ export class P2PAgent extends EventEmitter {
     });
 
     // Handle incoming P2P messages
-    this.swarm.on("message", (event: any) => {
+    this.swarm.on("message", (event: P2PMessageEvent) => {
       this.handleIncomingMessage(event.message, event.from);
     });
 
     // Handle incoming file transfers
-    this.swarm.on("file", (event: any) => {
+    this.swarm.on("file", (event: P2PFileEvent) => {
       const outDir = join(this.config.dataDir, "received");
       mkdirSync(outDir, { recursive: true });
       const filePath = join(outDir, event.filename);
@@ -109,7 +113,7 @@ export class P2PAgent extends EventEmitter {
       this.emit("file:received", { from: event.from, filename: event.filename, path: filePath, size: event.size });
     });
 
-    this.swarm.on("peer:identified", (peer: any) => {
+    this.swarm.on("peer:identified", (peer: PeerConnection) => {
       // Register peer's swarm public key
       if (peer.agentId) {
         this.state.knownPeers[peer.remotePublicKey] = {
@@ -368,7 +372,7 @@ export class P2PAgent extends EventEmitter {
         }
         try {
           this.state.privateKey = decryptPrivateKey(this.state.encryptedPrivateKey, passphrase);
-        } catch (e) {
+        } catch {
           console.error(`[Agent] ERROR: Failed to decrypt private key — wrong passphrase?`);
           process.exit(1);
         }

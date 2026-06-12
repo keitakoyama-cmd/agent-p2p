@@ -18,7 +18,6 @@
  */
 
 import { EventEmitter } from "events";
-import { randomUUID } from "crypto";
 import type { TaskManager, TrackedTask } from "./manager";
 import type { AgentId } from "../../types/protocol";
 
