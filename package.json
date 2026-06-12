@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --import tsx --test tests/test_matching.ts tests/test_security_policy.ts tests/test_reputation.ts tests/test_verification.ts tests/test_economic.ts tests/test_marketplace.ts tests/test_crypto_signing.ts tests/test_validation_edges.ts tests/test_security_edges.ts tests/test_state_machine_edges.ts tests/test_relay.ts tests/test_protocol.ts tests/test_solana_client.ts",
+    "test": "node --import tsx --test tests/test_matching.ts tests/test_security_policy.ts tests/test_reputation.ts tests/test_verification.ts tests/test_economic.ts tests/test_marketplace.ts tests/test_crypto_signing.ts tests/test_validation_edges.ts tests/test_security_edges.ts tests/test_state_machine_edges.ts tests/test_relay.ts tests/test_protocol.ts tests/test_solana_client.ts tests/test_security_traversal.ts",
     "test:e2e": "node --import tsx --test --test-concurrency=1 tests/test_e2e_security.ts tests/test_e2e_evm.ts tests/test_e2e_economic.ts tests/test_e2e_project.ts tests/test_e2e_routes.ts",
     "test:integration": "node --import tsx --test tests/test_e2e_solana.ts",
     "test:all": "npm test && npm run test:e2e",
