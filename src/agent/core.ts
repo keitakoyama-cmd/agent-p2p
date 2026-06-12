@@ -65,7 +65,7 @@ interface AgentState {
   encryptedPrivateKey?: EncryptedKey; // AES-256-GCM encrypted private key
   namespace: string;
   inbox: SignedMessage[];
-  knownPeers: Record<string, { publicKey: string; agentId: AgentId }>;
+  knownPeers: Record<string, { publicKey: string; agentId: AgentId; ed25519PublicKey?: string }>;
 }
 
 export interface AgentConfig {
@@ -73,6 +73,7 @@ export interface AgentConfig {
   agentId: AgentId;
   orgId: OrgId;
   namespace: string; // P2P topic namespace
+  requireSignedHandshake?: boolean; // reject peers that send an unsigned handshake
 }
 
 export class P2PAgent extends EventEmitter {
@@ -107,6 +108,10 @@ export class P2PAgent extends EventEmitter {
       agentId: this.config.agentId,
       namespace: this.config.namespace,
       seed: this.deriveSeed(),
+      signingKey: this.keys.privateKey,
+      publicKey: this.keys.publicKey,
+      resolvePinnedKey: (agentId) => this.resolvePinnedKey(agentId),
+      requireSignedHandshake: this.config.requireSignedHandshake,
     });
 
     // Handle incoming P2P messages
@@ -136,6 +141,7 @@ export class P2PAgent extends EventEmitter {
         this.state.knownPeers[peer.remotePublicKey] = {
           publicKey: peer.remotePublicKey,
           agentId: peer.agentId,
+          ed25519PublicKey: peer.ed25519PublicKey,
         };
         this.saveState();
       }
@@ -365,6 +371,20 @@ export class P2PAgent extends EventEmitter {
     return createHash("sha256")
       .update(this.config.agentId + this.state.privateKey)
       .digest();
+  }
+
+  /**
+   * Look up the Ed25519 public key (base64) we previously pinned for an agent
+   * during a verified handshake (Trust On First Use). Returns undefined for a
+   * first-time peer, in which case the swarm trusts the key it presents.
+   */
+  private resolvePinnedKey(agentId: AgentId): string | undefined {
+    for (const entry of Object.values(this.state.knownPeers)) {
+      if (entry.agentId === agentId && entry.ed25519PublicKey) {
+        return entry.ed25519PublicKey;
+      }
+    }
+    return undefined;
   }
 
   private loadOrCreateState(): void {

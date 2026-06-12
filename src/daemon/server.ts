@@ -111,6 +111,7 @@ function parseArgs() {
     discoveryUrl: get("--discovery-url", ""),
     description: get("--description", ""),
     enableBilling: has("--enable-billing"),
+    requireSignedHandshake: has("--require-signed-handshake"),
     solanaNetwork: get("--solana-network", "devnet") as "devnet" | "mainnet-beta",
     solanaRpcUrl: get("--solana-rpc-url", ""),
   };
@@ -245,6 +246,7 @@ async function main() {
     orgId: config.orgId,
     namespace: config.namespace,
     dataDir: config.dataDir,
+    requireSignedHandshake: config.requireSignedHandshake,
   });
 
   await agent.start();
