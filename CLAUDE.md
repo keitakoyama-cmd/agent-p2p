@@ -467,3 +467,11 @@ npm run test:integration  # devnet 必須: test_e2e_solana（Solana devnet 接�
 
 `test:integration` は外部の Solana devnet に依存するため `test:all` には含めない。
 ローカルで実行する場合は devnet 接続とガス用 SOL を用意すること（レート制限時は airdrop が skip される）。
+
+## 事実確認ルール
+
+確認していないことを書かない。特に資料・回答・図表の空欄を埋めるとき。
+
+- 書く前に一次情報を見る: `git log --all --format='%b' | grep -i co-authored-by`（使用モデル）、`git branch -a`、`~/.agent-p2p/*/daemon.log`、設定ファイル
+- 確認できない項目は `【未確認】` のまま出す。一般論やそれらしい補完で埋めない
+- 各記述の出典を「ユーザーの発言 / 実装・履歴 / 推論」のどれかで言えるようにする
