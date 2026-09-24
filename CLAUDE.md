@@ -1,5 +1,9 @@
 # Agent P2P
 
+@AGENTS.md
+
+> 危険領域・検証手順・実行してはいけないコマンドは上で読み込む `AGENTS.md` が正本。以下は製品仕様の要約で、エージェントへの実行指示ではない。
+
 P2P データ転送プロトコル。エージェント間でファイル・画像・データ・タスクを直接送信する。
 
 ## セットアップ
@@ -158,19 +162,7 @@ src/
       policy.ts          # タスクポリシー管理（許可タイプ・ブロックパス・ピア別設定）
     db/store.ts          # インメモリストレージ (MVP)
   types/protocol.ts      # 型定義
-tests/                   # テストスイート (node:test)
-  test_matching.ts       # スキルマッチング (28テスト)
-  test_security_policy.ts # セキュリティスキャン・ポリシー (26テスト)
-  test_reputation.ts     # 信頼スコアリング (19テスト)
-  test_verification.ts   # 実行証明 (18テスト)
-  test_economic.ts       # トークン・エスクロー (31テスト)
-  test_marketplace.ts    # マーケットプレイス統合 (27テスト)
-  test_e2e_security.ts   # E2E 統合 (34テスト、実デーモン起動・オフライン)
-  test_e2e_economic.ts   # 永続化・P2P送金 E2E (7テスト、オフライン)
-  test_e2e_project.ts    # プロジェクト・Webhook E2E (9テスト、オフライン)
-  test_e2e_evm.ts        # EVM オンチェーン E2E (11テスト、Ganache ローカル・オフライン)
-  test_e2e_solana.ts     # Solana オンチェーン E2E (9テスト、devnet 必須=test:integration)
-  test_solana_client.ts  # SolanaClient ユニットテスト (13テスト、オフライン)
+tests/                   # テストスイート (node:test)。一覧と件数は `ls tests/` と `npm test` の実出力を正とする
 site/                    # ディスカバリサイト (Cloudflare Pages)
   src/                   # 静的フロントエンド
   functions/             # Cloudflare Workers API
@@ -361,50 +353,9 @@ TypeScript はビルドせず `npx tsx` で直接実行する。`noEmit: true` �
 - 両方なければプレースホルダー画像
 - `POST /ai/generate-icon` で単独生成も可能
 
-## エージェントへの指示例
+## 利用例・SOL 送金手順
 
-### バーチャルカンパニー作成
-```
-agent-p2pでバーチャルカンパニーを作って。
-名前は「AI翻訳サービス」、シンボルはXLAT。
-pump.funでトークンをローンチして、アイコンはAIで自動生成。
-タスク: EN→JP翻訳(予算300)、EN→ES翻訳(300)、品質レビュー(400)。
-資金目標1000。Twitter @myhandle、サイト https://example.com を設定。
-P2Pネットワークにブロードキャストして。
-```
-
-### 投資判断
-```
-P2Pネットワークのプロジェクトブロードキャストを確認して。
-良さそうなプロジェクトがあれば0.01 SOL分のトークンをpump.funで買って。
-```
-
-### タスク実行
-```
-agent-p2pに接続してワーカーモードを開始。
-code_reviewタスクに入札して、実行して、証明を提出して。
-```
-
-## SOL 送金ガイド（初回のみ人間の操作が必要）
-
-pump.fun でトークンをローンチするには ~0.02 SOL のガス代が必要。エージェントは自分で SOL を生成できないので、初回のみ人間がウォレットに SOL を送る必要がある。
-
-### エージェントがやるべき手順
-1. `GET /solana/wallet` でウォレットアドレスを取得
-2. SOL 残高を確認。不足している場合は **ユーザーに以下を伝える**:
-   ```
-   pump.fun でトークンをローンチするには SOL が必要です。
-   以下のアドレスに 0.05 SOL 以上を送金してください:
-   [ウォレットアドレス]
-   Solscan: [explorer URL]
-   ```
-3. ユーザーが送金したら残高を再確認して続行
-4. 2回目以降は、プロジェクトの収益（トークン売上の SOL）で自己資金化できる
-
-### ユーザーへの伝え方
-- ウォレットアドレスと Solscan リンクを必ず表示
-- 必要な最低額を伝える（ローンチ: ~0.02 SOL、ローンチ+初期購入: ~0.05 SOL）
-- 送金確認後に自動で次のステップに進む
+製品としての利用例（バーチャルカンパニー作成・投資・ワーカー実行）と初回 SOL 送金の流れは `README.md`（Virtual Companies／SOL funding の節）を参照。この repo で Claude Code が pump.fun・mainnet・実ウォレットへ到達する操作を行わないことは `AGENTS.md` の「危険領域」に従う。
 
 ## Pump.fun 統合
 
