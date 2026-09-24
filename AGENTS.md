@@ -6,7 +6,7 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 # Agent P2P 実装エージェント向け指示
 
-署名付きP2P通信、タスク実行、トークン・エスクロー、Solana/EVM/Pump.fun のオンチェーン経路を持つ Next.js / TypeScript プロジェクト。コード変更が秘密鍵漏洩や実送金に直結し得る。親ディレクトリの `AGENTS.md` も常に適用する。
+署名付きP2P通信、タスク実行、トークン・エスクロー、Solana/EVM/Pump.fun のオンチェーン経路を持つ Next.js / TypeScript プロジェクト。コード変更が秘密鍵漏洩や実送金に直結し得る。全域の規律は `~/.codex/AGENTS.md`、このrepo固有の手順・危険領域は本ファイル。
 
 ## セットアップ・コマンド
 
